@@ -1,0 +1,37 @@
+services:
+  mikevideo-postgres:
+    image: postgres:16-alpine
+    container_name: mikevideo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mikevideo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mikevideo}
+      POSTGRES_DB: mikevideo
+    volumes:
+      - /data/mikevideo/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mikevideo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mikevideo-cloud:
+    build: .
+    container_name: mikevideo-cloud
+    restart: unless-stopped
+    depends_on:
+      mikevideo-postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATA_ROOT: /data/mikevideo
+      INGEST_DATA_ROOT: /data/mikevideo/ingest
+      DATABASE_URL: postgres://mikevideo:${POSTGRES_PASSWORD:-mikevideo}@mikevideo-postgres:5432/mikevideo
+    volumes:
+      # Shared with ingest: cloud reads .../ingest/{upload_id}/data.bin after the
+      # callback, moves it out, and writes renditions under /data/mikevideo/{user}/{video}/.
+      - /data/mikevideo:/data/mikevideo
+    ports:
+      # Publish on the docker bridge gateway only (172.17.0.1) — NOT public.
+      # Caddy (in the mikeos-osm network) reaches it via reverse_proxy 172.17.0.1:8090.
+      - "172.17.0.1:${PORT:-8090}:${PORT:-8090}"

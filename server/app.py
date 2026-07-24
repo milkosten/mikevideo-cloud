@@ -1,0 +1,377 @@
+"""mikevideo-cloud — the MikeVideo control plane + browser experience.
+
+FastAPI + asyncpg + Postgres + ffmpeg. Auth: X-API-KEY -> user_id (mikeoscomputers).
+Mints HMAC upload tickets ingest trusts; ingest calls back on completion; an
+ffmpeg worker produces MP4 + HLS + thumbnail.
+
+Guard rails: ISO-8601 timestamps, parameterized SQL, never-trust-200,
+never load a whole file into RAM (ffmpeg streams; media served with byte-range).
+"""
+import asyncio
+import logging
+import mimetypes
+import os
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import FastAPI, Request, Header
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, Response, StreamingResponse
+
+from . import config, db, encode
+from .identity import resolve_agent_key
+from .tickets import mint_ticket, verify_callback_signature
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("mikevideo-cloud")
+
+app = FastAPI(title="mikevideo-cloud")
+
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _iso(dt) -> str | None:
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    return str(dt)
+
+
+def _parse_ts(v):
+    """Tolerant timestamp parse -> aware datetime or None. Accepts ISO-8601
+    strings and epoch millis/seconds."""
+    if v is None or v == "":
+        return None
+    try:
+        if isinstance(v, (int, float)):
+            secs = v / 1000.0 if v > 1e11 else float(v)
+            return datetime.fromtimestamp(secs, tz=timezone.utc)
+        s = str(v).strip()
+        if s.isdigit():
+            n = int(s)
+            secs = n / 1000.0 if n > 1e11 else float(n)
+            return datetime.fromtimestamp(secs, tz=timezone.utc)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+async def _auth(request: Request) -> str | None:
+    key = request.headers.get("x-api-key") or request.headers.get("X-API-KEY")
+    return await resolve_agent_key(key)
+
+
+async def _user_usage(user_id: str) -> int:
+    val = await db.pool().fetchval(
+        "SELECT COALESCE(SUM(bytes),0) FROM mikevideo.videos"
+        " WHERE user_id=$1 AND status<>'failed'", user_id)
+    return int(val or 0)
+
+
+def _thumb_url(user_id: str, video_id: str) -> str:
+    return f"/media/{user_id}/{video_id}/thumb.jpg"
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def _startup():
+    config.DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    await db.connect()
+    await db.migrate()
+    asyncio.create_task(encode.worker_loop())
+    await encode.requeue_pending()
+    logger.info("mikevideo-cloud started")
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+@app.get("/api/health")
+async def health():
+    ok_db = False
+    try:
+        await db.pool().fetchval("SELECT 1")
+        ok_db = True
+    except Exception as e:
+        logger.warning("health db check failed: %s", e)
+    return {"status": "ok" if ok_db else "degraded", "service": "mikevideo-cloud",
+            "db": ok_db}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/videos — auth + quota -> create row -> mint ticket
+# ---------------------------------------------------------------------------
+@app.post("/api/videos")
+async def create_video(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    filename = str(body.get("filename") or "video.mp4")
+    content_type = str(body.get("content_type") or "video/mp4")
+    try:
+        total_size = int(body.get("total_size"))
+        chunk_size = int(body.get("chunk_size"))
+        count = int(body.get("count"))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "total_size, chunk_size, count required (ints)"},
+                            status_code=400)
+    file_hash = str(body.get("file_hash") or "")
+    if not file_hash:
+        return JSONResponse({"error": "file_hash required (sha256)"}, status_code=400)
+    if total_size <= 0 or total_size > config.MAX_UPLOAD_BYTES:
+        return JSONResponse({"error": f"total_size out of range (max {config.MAX_UPLOAD_BYTES})"},
+                            status_code=400)
+
+    # Quota check BEFORE minting a ticket.
+    used = await _user_usage(user_id)
+    if used + total_size > config.USER_QUOTA_BYTES:
+        return JSONResponse(
+            {"error": "quota exceeded", "used": used, "quota": config.USER_QUOTA_BYTES,
+             "requested": total_size}, status_code=507)
+
+    device_id = str(body.get("device_id") or "") or None
+    taken_at = _parse_ts(body.get("taken_at"))
+
+    video_id = uuid.uuid4()
+    upload_id = uuid.uuid4().hex  # filesystem-safe (hex) for ingest
+
+    await db.pool().execute(
+        "INSERT INTO mikevideo.videos"
+        " (id, user_id, device_id, upload_id, filename, content_type, bytes,"
+        "  sha256, status, taken_at)"
+        " VALUES($1,$2,$3,$4,$5,$6,$7,$8,'uploading',$9)",
+        video_id, user_id, device_id, upload_id, filename, content_type,
+        total_size, file_hash, taken_at)
+
+    ticket = mint_ticket(upload_id=upload_id, user_id=user_id,
+                         max_size=total_size, file_hash=file_hash)
+
+    return {
+        "video_id": str(video_id),
+        "upload_id": upload_id,
+        "ingest_url": config.INGEST_URL,
+        "ticket": ticket,
+        "chunk_size": chunk_size,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/internal/complete — ingest callback (CALLBACK_SECRET) -> enqueue
+# ---------------------------------------------------------------------------
+@app.post("/api/internal/complete")
+async def internal_complete(request: Request,
+                            x_ingest_signature: str = Header(default="")):
+    raw = await request.body()
+    if not verify_callback_signature(raw, x_ingest_signature):
+        return JSONResponse({"error": "bad signature"}, status_code=401)
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    upload_id = str(payload.get("upload_id") or "")
+    if not upload_id:
+        return JSONResponse({"error": "upload_id required"}, status_code=400)
+
+    row = await db.pool().fetchrow(
+        "SELECT id, status FROM mikevideo.videos WHERE upload_id=$1", upload_id)
+    if row is None:
+        return JSONResponse({"error": "unknown upload_id"}, status_code=404)
+
+    video_id = str(row["id"])
+    # never-trust-200: only enqueue if we actually flipped a row to encoding.
+    updated = await db.pool().fetchval(
+        "UPDATE mikevideo.videos SET status='encoding', sha256=COALESCE($2,sha256),"
+        " updated_at=now() WHERE id=$1 AND status IN ('uploading','failed')"
+        " RETURNING id",
+        row["id"], str(payload.get("file_hash") or "") or None)
+    if updated is None and row["status"] not in ("encoding", "ready"):
+        return JSONResponse({"error": "could not transition"}, status_code=409)
+    if row["status"] not in ("encoding", "ready"):
+        encode.enqueue(video_id)
+    return {"ok": True, "video_id": video_id, "enqueued": row["status"] not in ("encoding", "ready")}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/videos — the user's library
+# ---------------------------------------------------------------------------
+@app.get("/api/videos")
+async def list_videos(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    rows = await db.pool().fetch(
+        "SELECT id, filename, status, duration_sec, width, height, bytes,"
+        " taken_at, created_at FROM mikevideo.videos"
+        " WHERE user_id=$1 ORDER BY created_at DESC LIMIT 500", user_id)
+    out = []
+    for r in rows:
+        vid = str(r["id"])
+        out.append({
+            "id": vid,
+            "filename": r["filename"],
+            "status": r["status"],
+            "duration_sec": r["duration_sec"],
+            "width": r["width"],
+            "height": r["height"],
+            "bytes": r["bytes"],
+            "thumb_url": _thumb_url(user_id, vid) if r["status"] == "ready" else None,
+            "taken_at": _iso(r["taken_at"]),
+            "created_at": _iso(r["created_at"]),
+        })
+    return {"videos": out}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/videos/{id} — detail + HLS master url + mp4 + thumb
+# ---------------------------------------------------------------------------
+@app.get("/api/videos/{video_id}")
+async def get_video(video_id: str, request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        vid = uuid.UUID(video_id)
+    except ValueError:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    r = await db.pool().fetchrow(
+        "SELECT id, filename, content_type, status, error, duration_sec, width,"
+        " height, bytes, taken_at, created_at FROM mikevideo.videos"
+        " WHERE id=$1 AND user_id=$2", vid, user_id)
+    if r is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    base = f"/media/{user_id}/{video_id}"
+    ready = r["status"] == "ready"
+    return {
+        "id": video_id,
+        "filename": r["filename"],
+        "content_type": r["content_type"],
+        "status": r["status"],
+        "error": r["error"],
+        "duration_sec": r["duration_sec"],
+        "width": r["width"],
+        "height": r["height"],
+        "bytes": r["bytes"],
+        "hls_url": f"{base}/hls/master.m3u8" if ready else None,
+        "mp4_url": f"{base}/video.mp4" if ready else None,
+        "thumb_url": f"{base}/thumb.jpg" if ready else None,
+        "taken_at": _iso(r["taken_at"]),
+        "created_at": _iso(r["created_at"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Media serving with byte-range. v1 auth model: paths are gated on the
+# unguessable video_id (a v4 uuid). We validate the {user_id}/{video_id}
+# pair exists and the path stays inside its dir (no traversal). This keeps
+# HLS/MP4 fetchable by <video>/hls.js without per-segment API keys.
+# ---------------------------------------------------------------------------
+_MEDIA_CACHE: dict[str, bool] = {}
+
+
+async def _media_allowed(user_id: str, video_id: str) -> bool:
+    key = f"{user_id}/{video_id}"
+    if key in _MEDIA_CACHE:
+        return _MEDIA_CACHE[key]
+    try:
+        vid = uuid.UUID(video_id)
+    except ValueError:
+        return False
+    row = await db.pool().fetchrow(
+        "SELECT 1 FROM mikevideo.videos WHERE id=$1 AND user_id=$2", vid, user_id)
+    ok = row is not None
+    if ok:
+        _MEDIA_CACHE[key] = True
+    return ok
+
+
+def _range_response(path: Path, request: Request) -> Response:
+    file_size = path.stat().st_size
+    ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    if path.suffix == ".m3u8":
+        ctype = "application/vnd.apple.mpegurl"
+    elif path.suffix == ".ts":
+        ctype = "video/mp2t"
+    range_header = request.headers.get("range")
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=3600"}
+    if not range_header:
+        return FileResponse(str(path), media_type=ctype, headers=headers)
+
+    try:
+        unit, rng = range_header.split("=", 1)
+        start_s, end_s = rng.split("-", 1)
+        start = int(start_s) if start_s else 0
+        end = int(end_s) if end_s else file_size - 1
+    except Exception:
+        return FileResponse(str(path), media_type=ctype, headers=headers)
+    end = min(end, file_size - 1)
+    if start > end or start >= file_size:
+        return Response(status_code=416,
+                        headers={"Content-Range": f"bytes */{file_size}"})
+    length = end - start + 1
+
+    def _iter():
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                buf = f.read(min(1024 * 1024, remaining))
+                if not buf:
+                    break
+                remaining -= len(buf)
+                yield buf
+
+    headers.update({
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Content-Length": str(length),
+    })
+    return StreamingResponse(_iter(), status_code=206, media_type=ctype,
+                             headers=headers)
+
+
+@app.get("/media/{user_id}/{video_id}/{path:path}")
+async def serve_media(user_id: str, video_id: str, path: str, request: Request):
+    if not await _media_allowed(user_id, video_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    base = (config.DATA_ROOT / user_id / video_id).resolve()
+    target = (base / path).resolve()
+    if not str(target).startswith(str(base) + os.sep):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not target.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return _range_response(target, request)
+
+
+# ---------------------------------------------------------------------------
+# Browser web app
+# ---------------------------------------------------------------------------
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    f = WEB_DIR / "index.html"
+    return HTMLResponse(f.read_text())
+
+
+@app.get("/hls.js")
+async def hlsjs():
+    f = WEB_DIR / "hls.min.js"
+    return Response(f.read_text(), media_type="application/javascript",
+                    headers={"Cache-Control": "public, max-age=86400"})

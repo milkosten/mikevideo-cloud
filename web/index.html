@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MikeVideo</title>
+<style>
+  :root{
+    --bg:#1a1410; --bg2:#241b14; --card:#2b2018; --line:#3a2c20;
+    --ink:#f4ece2; --muted:#b79f89; --accent:#ff7a3d; --accent2:#ffb066;
+    --ok:#5fce8f; --warn:#ffcf5c; --radius:14px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    background:radial-gradient(1200px 600px at 70% -10%,#3a281c 0%,var(--bg) 55%);
+    color:var(--ink);min-height:100vh}
+  a{color:var(--accent2);text-decoration:none}
+  header{display:flex;align-items:center;gap:14px;padding:18px 26px;
+    border-bottom:1px solid var(--line);position:sticky;top:0;
+    background:rgba(26,20,16,.82);backdrop-filter:blur(10px);z-index:10}
+  .logo{font-size:22px;font-weight:800;letter-spacing:.3px}
+  .logo span{color:var(--accent)}
+  .spacer{flex:1}
+  .keyfield{display:flex;gap:8px;align-items:center}
+  input,button{font:inherit}
+  input[type=password],input[type=text]{background:var(--bg2);border:1px solid var(--line);
+    color:var(--ink);padding:8px 12px;border-radius:10px;min-width:230px}
+  button{background:linear-gradient(180deg,var(--accent2),var(--accent));color:#231207;
+    border:none;padding:9px 16px;border-radius:10px;font-weight:700;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--ink);font-weight:600}
+  button:disabled{opacity:.5;cursor:default}
+  main{max-width:1080px;margin:0 auto;padding:26px}
+  h2{font-weight:700;margin:0 0 14px}
+  .drop{border:2px dashed var(--line);border-radius:var(--radius);padding:30px;
+    text-align:center;color:var(--muted);background:var(--bg2);transition:.15s;margin-bottom:26px}
+  .drop.hot{border-color:var(--accent);color:var(--ink);background:#2e2115}
+  .drop b{color:var(--accent2)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    overflow:hidden;cursor:pointer;transition:.15s}
+  .card:hover{transform:translateY(-3px);border-color:var(--accent)}
+  .thumb{aspect-ratio:16/9;background:#160f0a center/cover no-repeat;display:flex;
+    align-items:center;justify-content:center;color:#6b543f}
+  .thumb .ph{color:#6b543f;font-size:34px}
+  .meta{padding:11px 13px}
+  .title{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  .sub{color:var(--muted);font-size:12px;margin-top:4px;display:flex;gap:8px;align-items:center}
+  .chip{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:700}
+  .chip.ready{background:rgba(95,206,143,.16);color:var(--ok)}
+  .chip.encoding{background:rgba(255,207,92,.16);color:var(--warn)}
+  .chip.uploading{background:rgba(255,176,102,.16);color:var(--accent2)}
+  .chip.failed{background:rgba(255,90,90,.18);color:#ff8a8a}
+  .empty{color:var(--muted);padding:40px;text-align:center}
+  /* upload progress */
+  #uploads .up{background:var(--bg2);border:1px solid var(--line);border-radius:10px;
+    padding:10px 13px;margin-bottom:10px}
+  .bar{height:7px;background:#160f0a;border-radius:5px;overflow:hidden;margin-top:7px}
+  .bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+  /* watch */
+  #watch{position:fixed;inset:0;background:#0d0906;z-index:50;display:none;flex-direction:column}
+  #watch.on{display:flex}
+  .wbar{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--line)}
+  #player{flex:1;width:100%;background:#000}
+  video{width:100%;height:100%;object-fit:contain;background:#000}
+  .hint{color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Mike<span>Video</span></div>
+  <div class="spacer"></div>
+  <div class="keyfield">
+    <input id="apikey" type="password" placeholder="paste your X-API-KEY" autocomplete="off">
+    <button class="ghost" id="savekey">Save</button>
+  </div>
+</header>
+
+<main>
+  <div class="drop" id="drop">
+    <div><b>Drop a video here</b> or click to choose — it uploads in chunks (never loads the whole file).</div>
+    <input type="file" id="file" accept="video/*" style="display:none">
+  </div>
+  <div id="uploads"></div>
+
+  <h2>Your library</h2>
+  <div id="lib" class="grid"></div>
+  <div id="libempty" class="empty" style="display:none">No videos yet. Drop one above to get started.</div>
+</main>
+
+<div id="watch">
+  <div class="wbar">
+    <button class="ghost" id="back">&larr; Library</button>
+    <div id="wtitle" style="font-weight:600"></div>
+    <div class="spacer"></div>
+    <div class="hint" id="whint"></div>
+  </div>
+  <div id="player"></div>
+</div>
+
+<script src="/hls.js"></script>
+<script>
+const CHUNK = 4 * 1024 * 1024;            // 4 MiB chunks (<= ingest MAX_CHUNK_SIZE 8 MiB)
+let API_KEY = localStorage.getItem('mikevideo_key') || '';
+document.getElementById('apikey').value = API_KEY;
+
+function hdr(extra){ const h = Object.assign({'X-API-KEY':API_KEY}, extra||{}); return h; }
+function fmtDur(s){ if(!s) return ''; s=Math.round(s); const m=(s/60)|0, ss=('0'+(s%60)).slice(-2); return m+':'+ss; }
+
+document.getElementById('savekey').onclick = ()=>{
+  API_KEY = document.getElementById('apikey').value.trim();
+  localStorage.setItem('mikevideo_key', API_KEY);
+  loadLibrary();
+};
+
+// ---- WebCrypto sha256 helpers ----
+async function sha256hex(buf){
+  const d = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(d)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+// Streaming whole-file sha256 is not in WebCrypto; we accumulate per-chunk into
+// a running digest is impossible, so we hash the whole file by feeding a growing
+// buffer is disallowed by the memory rule. Instead we compute the whole-file
+// hash incrementally with a JS sha256 fallback only if needed. Here we hash the
+// whole file with crypto.subtle over a single ArrayBuffer ONLY for small files;
+// for larger, we chain chunk digests. To honour the memory rule AND get a real
+// whole-file sha256, we use a streaming JS implementation below.
+
+// Minimal streaming SHA-256 (so we never hold the whole file in RAM).
+const SHA256 = (function(){
+  const K=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  function rotr(n,x){return (x>>>n)|(x<<(32-n));}
+  function create(){
+    let h=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+    let len=0; let buf=new Uint8Array(0);
+    const w=new Int32Array(64);
+    function block(p,off){
+      for(let i=0;i<16;i++) w[i]=(p[off+i*4]<<24)|(p[off+i*4+1]<<16)|(p[off+i*4+2]<<8)|(p[off+i*4+3]);
+      for(let i=16;i<64;i++){
+        const s0=rotr(7,w[i-15])^rotr(18,w[i-15])^(w[i-15]>>>3);
+        const s1=rotr(17,w[i-2])^rotr(19,w[i-2])^(w[i-2]>>>10);
+        w[i]=(w[i-16]+s0+w[i-7]+s1)|0;
+      }
+      let[a,b,c,d,e,f,g,hh]=h;
+      for(let i=0;i<64;i++){
+        const S1=rotr(6,e)^rotr(11,e)^rotr(25,e);
+        const ch=(e&f)^(~e&g);
+        const t1=(hh+S1+ch+K[i]+w[i])|0;
+        const S0=rotr(2,a)^rotr(13,a)^rotr(22,a);
+        const maj=(a&b)^(a&c)^(b&c);
+        const t2=(S0+maj)|0;
+        hh=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0;
+      }
+      h[0]=(h[0]+a)|0;h[1]=(h[1]+b)|0;h[2]=(h[2]+c)|0;h[3]=(h[3]+d)|0;
+      h[4]=(h[4]+e)|0;h[5]=(h[5]+f)|0;h[6]=(h[6]+g)|0;h[7]=(h[7]+hh)|0;
+    }
+    return {
+      update(chunk){
+        len+=chunk.length;
+        let data=buf.length?((()=>{const m=new Uint8Array(buf.length+chunk.length);m.set(buf);m.set(chunk,buf.length);return m;})()):chunk;
+        let off=0;
+        while(data.length-off>=64){ block(data,off); off+=64; }
+        buf=data.slice(off);
+      },
+      hex(){
+        const bitLen=len*8;
+        const pad=[]; pad.push(0x80);
+        let rem=(buf.length+1)%64;
+        let padLen=(rem<=56?56-rem:120-rem);
+        for(let i=0;i<padLen;i++) pad.push(0);
+        const hi=Math.floor(bitLen/0x100000000), lo=bitLen>>>0;
+        pad.push((hi>>>24)&255,(hi>>>16)&255,(hi>>>8)&255,hi&255);
+        pad.push((lo>>>24)&255,(lo>>>16)&255,(lo>>>8)&255,lo&255);
+        const tail=new Uint8Array(buf.length+pad.length);
+        tail.set(buf); tail.set(pad,buf.length);
+        for(let off=0;off<tail.length;off+=64) block(tail,off);
+        return h.map(x=>(x>>>0).toString(16).padStart(8,'0')).join('');
+      }
+    };
+  }
+  return {create};
+})();
+
+function readSlice(file, start, end){
+  return new Promise((res,rej)=>{
+    const r=new FileReader();
+    r.onload=()=>res(new Uint8Array(r.result));
+    r.onerror=()=>rej(r.error);
+    r.readAsArrayBuffer(file.slice(start,end));
+  });
+}
+
+async function buildManifest(file, uploadId){
+  const total=file.size;
+  const count=Math.ceil(total/CHUNK) || 1;
+  const chunks={};
+  const whole=SHA256.create();
+  for(let i=0;i<count;i++){
+    const start=i*CHUNK, end=Math.min(start+CHUNK,total);
+    const bytes=await readSlice(file,start,end);   // one chunk in RAM at a time
+    chunks[String(i)]='sha256:'+await sha256hex(bytes.buffer);
+    whole.update(bytes);
+  }
+  return {
+    upload_id: uploadId,
+    filename: file.name,
+    content_type: file.type||'video/mp4',
+    total_size: total,
+    chunk_size: CHUNK,
+    count: count,
+    chunk_hash_algo: 'sha256',
+    file_hash: 'sha256:'+whole.hex(),
+    chunks: chunks
+  };
+}
+
+async function uploadFile(file){
+  if(!API_KEY){ alert('Paste your X-API-KEY first.'); return; }
+  const box=document.getElementById('uploads');
+  const el=document.createElement('div'); el.className='up';
+  el.innerHTML=`<div><b>${file.name}</b> <span class="hint" data-s>hashing…</span></div>
+    <div class="bar"><i></i></div>`;
+  box.prepend(el);
+  const bar=el.querySelector('i'), stat=el.querySelector('[data-s]');
+  const set=(p,t)=>{bar.style.width=(p*100).toFixed(1)+'%'; if(t)stat.textContent=t;};
+
+  try{
+    // 1. ask cloud for a ticket — but we need file_hash first, so build manifest.
+    // We build a tiny manifest with a placeholder to get upload_id? No: cloud
+    // issues upload_id. So: build manifest with our own hash, POST /api/videos
+    // (cloud returns its upload_id), then re-key the manifest to that upload_id.
+    set(0,'hashing (sha256, streamed)…');
+    const tmpManifest=await buildManifest(file,'pending');
+    set(0.05,'requesting ticket…');
+    const cr=await fetch('/api/videos',{method:'POST',headers:hdr({'Content-Type':'application/json'}),
+      body:JSON.stringify({filename:file.name,content_type:tmpManifest.content_type,
+        total_size:tmpManifest.total_size,file_hash:tmpManifest.file_hash,
+        chunk_size:CHUNK,count:tmpManifest.count})});
+    if(!cr.ok){ throw new Error('ticket '+cr.status+' '+await cr.text()); }
+    const tk=await cr.json();
+    const manifest=Object.assign({},tmpManifest,{upload_id:tk.upload_id});
+    const ingest=tk.ingest_url, ticket=tk.ticket;
+
+    // 2. init
+    set(0.08,'init…');
+    const ir=await fetch(ingest+'/ingest/init',{method:'POST',
+      headers:{'Authorization':'Bearer '+ticket,'Content-Type':'application/json'},
+      body:JSON.stringify(manifest)});
+    if(!ir.ok){ throw new Error('init '+ir.status+' '+await ir.text()); }
+    let init=await ir.json();
+
+    // 3. resume-aware: fetch status, send only missing
+    const sr=await fetch(ingest+'/ingest/'+manifest.upload_id+'/status',
+      {headers:{'Authorization':'Bearer '+ticket}});
+    const status=await sr.json();
+    let missing=status.missing.slice();
+    const totalC=manifest.count;
+    let done=totalC-missing.length;
+
+    // 4. send missing chunks (small parallelism)
+    const PAR=3; let idx=0;
+    async function worker(){
+      while(idx<missing.length){
+        const i=missing[idx++];
+        const start=i*CHUNK, end=Math.min(start+CHUNK,manifest.total_size);
+        const bytes=await readSlice(file,start,end);
+        let ok=false;
+        for(let attempt=0;attempt<3&&!ok;attempt++){
+          const r=await fetch(ingest+'/ingest/'+manifest.upload_id+'/chunk/'+i,
+            {method:'PUT',headers:{'Authorization':'Bearer '+ticket,
+              'Content-Type':'application/octet-stream'},body:bytes});
+          if(r.ok){ok=true;} else if(r.status===422){ throw new Error('chunk '+i+' rejected 422'); }
+        }
+        if(!ok) throw new Error('chunk '+i+' failed after retries');
+        done++; set(done/totalC,'uploading '+done+'/'+totalC);
+      }
+    }
+    await Promise.all(Array.from({length:PAR},worker));
+
+    // 5. finalize
+    set(0.99,'finalizing…');
+    const fr=await fetch(ingest+'/ingest/'+manifest.upload_id+'/finalize',
+      {method:'POST',headers:{'Authorization':'Bearer '+ticket}});
+    const fbody=await fr.json();
+    if(!fr.ok || !fbody.complete){ throw new Error('finalize: '+JSON.stringify(fbody)); }
+    set(1,'done — encoding…');
+    setTimeout(()=>{el.remove();},4000);
+    loadLibrary();
+  }catch(e){
+    stat.textContent='failed: '+e.message; el.style.borderColor='#ff5a5a';
+    console.error(e);
+  }
+}
+
+// ---- library ----
+async function loadLibrary(){
+  const lib=document.getElementById('lib'), empty=document.getElementById('libempty');
+  if(!API_KEY){ lib.innerHTML=''; empty.style.display='block'; empty.textContent='Paste your X-API-KEY to see your library.'; return; }
+  try{
+    const r=await fetch('/api/videos',{headers:hdr()});
+    if(!r.ok){ lib.innerHTML=''; empty.style.display='block'; empty.textContent='Auth failed ('+r.status+').'; return; }
+    const {videos}=await r.json();
+    lib.innerHTML='';
+    if(!videos.length){ empty.style.display='block'; empty.textContent='No videos yet. Drop one above to get started.'; return; }
+    empty.style.display='none';
+    for(const v of videos){
+      const c=document.createElement('div'); c.className='card';
+      const thumb=v.thumb_url?`style="background-image:url('${v.thumb_url}')"`:'';
+      c.innerHTML=`<div class="thumb" ${thumb}>${v.thumb_url?'':'<span class="ph">▶</span>'}</div>
+        <div class="meta"><div class="title">${v.filename}</div>
+        <div class="sub"><span class="chip ${v.status}">${v.status}</span>
+        <span>${fmtDur(v.duration_sec)}</span></div></div>`;
+      if(v.status==='ready') c.onclick=()=>openWatch(v.id,v.filename);
+      lib.appendChild(c);
+    }
+  }catch(e){ console.error(e); }
+}
+
+// ---- watch ----
+let hls=null;
+async function openWatch(id,title){
+  const r=await fetch('/api/videos/'+id,{headers:hdr()});
+  if(!r.ok){ alert('cannot open'); return; }
+  const v=await r.json();
+  document.getElementById('wtitle').textContent=title;
+  document.getElementById('whint').textContent=(v.width&&v.height)?`${v.width}×${v.height} · ${fmtDur(v.duration_sec)}`:'';
+  const player=document.getElementById('player'); player.innerHTML='';
+  const video=document.createElement('video'); video.controls=true; video.autoplay=true;
+  if(v.thumb_url) video.poster=v.thumb_url;
+  player.appendChild(video);
+  if(hls){hls.destroy();hls=null;}
+  if(video.canPlayType('application/vnd.apple.mpegurl')){
+    video.src=v.hls_url;                        // native HLS (Safari)
+  }else if(window.Hls && Hls.isSupported()){
+    hls=new Hls({maxBufferLength:20});
+    hls.loadSource(v.hls_url); hls.attachMedia(video);
+  }else{
+    video.src=v.mp4_url;                         // fallback
+  }
+  document.getElementById('watch').classList.add('on');
+}
+document.getElementById('back').onclick=()=>{
+  document.getElementById('watch').classList.remove('on');
+  const p=document.getElementById('player'); p.innerHTML=''; if(hls){hls.destroy();hls=null;}
+  loadLibrary();
+};
+
+// ---- drop zone wiring ----
+const drop=document.getElementById('drop'), fileInput=document.getElementById('file');
+drop.onclick=()=>fileInput.click();
+fileInput.onchange=()=>{ if(fileInput.files[0]) uploadFile(fileInput.files[0]); fileInput.value=''; };
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('hot');}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('hot');}));
+drop.addEventListener('drop',e=>{ const f=e.dataTransfer.files[0]; if(f) uploadFile(f); });
+
+// poll library so encoding->ready flips live
+loadLibrary();
+setInterval(loadLibrary, 8000);
+</script>
+</body>
+</html>
