@@ -4,98 +4,152 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MikeVideo</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='1' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%23FF8A5B'/%3E%3Cstop offset='.5' stop-color='%23FF6FA5'/%3E%3Cstop offset='1' stop-color='%237C7CFF'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='%23131017'/%3E%3Cpath d='M13 11l9 5-9 5z' fill='url(%23g)'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..600&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:#1a1410; --bg2:#241b14; --card:#2b2018; --line:#3a2c20;
-    --ink:#f4ece2; --muted:#b79f89; --accent:#ff7a3d; --accent2:#ffb066;
-    --ok:#5fce8f; --warn:#ffcf5c; --radius:14px;
+    --bg:#131017; --bg2:#1b1723; --card:#201b29; --line:#2e2839;
+    --ink:#f5f0ea; --muted:#a79db4; --faint:#7c7389;
+    --coral:#FF8A5B; --rose:#FF6FA5; --peri:#7C7CFF; --sky:#4FC4E8;
+    --ok:#5fd39a; --warn:#ffcf5c; --err:#ff7a7a;
+    --grad:linear-gradient(100deg,var(--coral),var(--rose) 45%,var(--peri) 86%);
+    --radius:16px;
+    --sans:"Manrope",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --disp:"Fraunces",Georgia,"Times New Roman",serif;
   }
   *{box-sizing:border-box}
-  body{margin:0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
-    background:radial-gradient(1200px 600px at 70% -10%,#3a281c 0%,var(--bg) 55%);
-    color:var(--ink);min-height:100vh}
-  a{color:var(--accent2);text-decoration:none}
-  header{display:flex;align-items:center;gap:14px;padding:18px 26px;
-    border-bottom:1px solid var(--line);position:sticky;top:0;
-    background:rgba(26,20,16,.82);backdrop-filter:blur(10px);z-index:10}
-  .logo{font-size:22px;font-weight:800;letter-spacing:.3px}
-  .logo span{color:var(--accent)}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;font-family:var(--sans);color:var(--ink);min-height:100vh;background:var(--bg);
+    -webkit-font-smoothing:antialiased;font-size:15.5px;line-height:1.55}
+  body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:
+      radial-gradient(900px 480px at 82% -8%, rgba(255,111,165,.16), transparent 60%),
+      radial-gradient(760px 420px at 6% -6%, rgba(255,138,91,.14), transparent 60%),
+      radial-gradient(760px 520px at 60% 112%, rgba(124,124,255,.12), transparent 60%)}
+  .app{position:relative;z-index:1}
+  a{color:var(--rose);text-decoration:none}
+  input,button{font:inherit}
+
+  header{display:flex;align-items:center;gap:14px;padding:16px 24px;position:sticky;top:0;z-index:20;
+    border-bottom:1px solid var(--line);background:rgba(19,16,23,.72);backdrop-filter:blur(14px)}
+  .logo{display:flex;align-items:center;gap:11px;font-weight:800;font-size:20px;letter-spacing:-.01em}
+  .logo .mark{width:27px;height:27px;border-radius:8px;background:var(--grad);display:grid;place-items:center;
+    color:#fff;font-size:12px;box-shadow:0 6px 18px -6px rgba(255,111,165,.6)}
+  .logo .grad-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
   .spacer{flex:1}
   .keyfield{display:flex;gap:8px;align-items:center}
-  input,button{font:inherit}
-  input[type=password],input[type=text]{background:var(--bg2);border:1px solid var(--line);
-    color:var(--ink);padding:8px 12px;border-radius:10px;min-width:230px}
-  button{background:linear-gradient(180deg,var(--accent2),var(--accent));color:#231207;
-    border:none;padding:9px 16px;border-radius:10px;font-weight:700;cursor:pointer}
-  button.ghost{background:transparent;border:1px solid var(--line);color:var(--ink);font-weight:600}
-  button:disabled{opacity:.5;cursor:default}
-  main{max-width:1080px;margin:0 auto;padding:26px}
-  h2{font-weight:700;margin:0 0 14px}
-  .drop{border:2px dashed var(--line);border-radius:var(--radius);padding:30px;
-    text-align:center;color:var(--muted);background:var(--bg2);transition:.15s;margin-bottom:26px}
-  .drop.hot{border-color:var(--accent);color:var(--ink);background:#2e2115}
-  .drop b{color:var(--accent2)}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:18px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-    overflow:hidden;cursor:pointer;transition:.15s}
-  .card:hover{transform:translateY(-3px);border-color:var(--accent)}
-  .thumb{aspect-ratio:16/9;background:#160f0a center/cover no-repeat;display:flex;
-    align-items:center;justify-content:center;color:#6b543f}
-  .thumb .ph{color:#6b543f;font-size:34px}
-  .meta{padding:11px 13px}
-  .title{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;
-    text-overflow:ellipsis}
-  .sub{color:var(--muted);font-size:12px;margin-top:4px;display:flex;gap:8px;align-items:center}
-  .chip{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:700}
-  .chip.ready{background:rgba(95,206,143,.16);color:var(--ok)}
-  .chip.encoding{background:rgba(255,207,92,.16);color:var(--warn)}
-  .chip.uploading{background:rgba(255,176,102,.16);color:var(--accent2)}
-  .chip.failed{background:rgba(255,90,90,.18);color:#ff8a8a}
-  .empty{color:var(--muted);padding:40px;text-align:center}
-  /* upload progress */
-  #uploads .up{background:var(--bg2);border:1px solid var(--line);border-radius:10px;
-    padding:10px 13px;margin-bottom:10px}
-  .bar{height:7px;background:#160f0a;border-radius:5px;overflow:hidden;margin-top:7px}
-  .bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2))}
-  /* watch */
-  #watch{position:fixed;inset:0;background:#0d0906;z-index:50;display:none;flex-direction:column}
+  .keyfield .dot{width:9px;height:9px;border-radius:50%;background:#4a4356;flex:none;transition:.3s}
+  .keyfield.on .dot{background:var(--ok);box-shadow:0 0 0 4px rgba(95,211,154,.16)}
+  input[type=password],input[type=text]{background:var(--bg2);border:1px solid var(--line);color:var(--ink);
+    padding:9px 13px;border-radius:11px;min-width:210px;outline:none;transition:.15s}
+  input:focus{border-color:var(--peri);box-shadow:0 0 0 3px rgba(124,124,255,.18)}
+  input::placeholder{color:var(--faint)}
+  button{background:var(--grad);color:#fff;border:none;padding:10px 18px;border-radius:11px;font-weight:700;
+    cursor:pointer;transition:transform .15s,box-shadow .15s;box-shadow:0 10px 24px -12px rgba(255,111,165,.6)}
+  button:hover{transform:translateY(-1px)}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--ink);font-weight:600;box-shadow:none}
+  button.ghost:hover{border-color:var(--peri);color:#fff}
+  button:disabled{opacity:.5;cursor:default;transform:none}
+
+  main{max-width:1140px;margin:0 auto;padding:30px 24px 80px}
+
+  .drop{position:relative;border:1.5px dashed var(--line);border-radius:22px;padding:44px 30px;text-align:center;
+    color:var(--muted);background:linear-gradient(180deg,var(--bg2),rgba(27,23,35,.35));transition:.18s;
+    margin-bottom:26px;cursor:pointer;overflow:hidden}
+  .drop:hover{border-color:var(--peri);color:var(--ink)}
+  .drop.hot{border-color:var(--rose);color:var(--ink);background:rgba(255,111,165,.06)}
+  .drop .up-ic{width:52px;height:52px;border-radius:15px;background:var(--grad);margin:0 auto 16px;display:grid;
+    place-items:center;color:#fff;font-size:24px;box-shadow:0 14px 30px -12px rgba(255,138,91,.6)}
+  .drop .big{font-family:var(--disp);font-weight:400;font-size:22px;color:var(--ink);margin-bottom:6px;letter-spacing:-.01em}
+  .drop b{color:var(--rose);font-weight:600}
+  .drop small{color:var(--faint);font-size:13px;display:block;max-width:44ch;margin:0 auto}
+
+  #uploads .up{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px 16px;margin-bottom:11px}
+  #uploads .up b{font-weight:600}
+  .bar{height:8px;background:#151119;border-radius:6px;overflow:hidden;margin-top:9px}
+  .bar>i{display:block;height:100%;width:0;background:var(--grad);border-radius:6px;transition:width .25s}
+  .hint{color:var(--muted);font-size:12.5px}
+
+  .sec-head{display:flex;align-items:baseline;gap:12px;margin:6px 0 18px}
+  h2{font-family:var(--disp);font-weight:400;font-size:26px;letter-spacing:-.02em;margin:0}
+  .count{color:var(--faint);font-size:14px;font-weight:600}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;
+    cursor:pointer;transition:transform .18s,border-color .18s,box-shadow .18s}
+  .card:hover{transform:translateY(-4px);border-color:#3c3550;box-shadow:0 24px 44px -28px rgba(0,0,0,.85)}
+  .thumb{position:relative;aspect-ratio:16/9;background:#0f0b13 center/cover no-repeat;display:flex;
+    align-items:center;justify-content:center}
+  .thumb .ph{color:#4a4356;font-size:30px}
+  .thumb::after{content:"\25B6";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    font-size:18px;color:#fff;background:rgba(15,11,19,.42);opacity:0;transition:.18s}
+  .card:hover .thumb::after{opacity:1}
+  .meta{padding:13px 14px 15px}
+  .title{font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sub{color:var(--muted);font-size:12.5px;margin-top:8px;display:flex;gap:9px;align-items:center}
+  .chip{font-size:11px;padding:3px 9px;border-radius:20px;font-weight:700;text-transform:capitalize;letter-spacing:.02em}
+  .chip.ready{background:rgba(95,211,154,.15);color:var(--ok)}
+  .chip.encoding{background:rgba(255,207,92,.15);color:var(--warn);animation:pulse 1.6s ease-in-out infinite}
+  .chip.uploading{background:rgba(255,138,91,.16);color:var(--coral)}
+  .chip.failed{background:rgba(255,122,122,.16);color:var(--err)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+  .empty{color:var(--muted);padding:56px 20px;text-align:center;border:1px dashed var(--line);
+    border-radius:var(--radius);background:var(--bg2)}
+
+  #watch{position:fixed;inset:0;background:#0a0709;z-index:50;display:none;flex-direction:column}
   #watch.on{display:flex}
-  .wbar{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--line)}
-  #player{flex:1;width:100%;background:#000}
+  .wbar{display:flex;align-items:center;gap:14px;padding:13px 20px;border-bottom:1px solid var(--line);
+    background:rgba(10,7,9,.82);backdrop-filter:blur(8px)}
+  #wtitle{font-family:var(--disp);font-weight:400;font-size:18px;letter-spacing:-.01em}
+  #player{flex:1;width:100%;background:#000;display:flex}
   video{width:100%;height:100%;object-fit:contain;background:#000}
-  .hint{color:var(--muted);font-size:13px}
+
+  @media(max-width:640px){
+    header{flex-wrap:wrap;gap:10px;padding:14px 16px}
+    .keyfield{width:100%}
+    input[type=password],input[type=text]{flex:1;min-width:0}
+    main{padding:22px 16px 60px}
+    .drop{padding:34px 20px}
+  }
 </style>
 </head>
 <body>
+<div class="app">
 <header>
-  <div class="logo">Mike<span>Video</span></div>
+  <div class="logo"><span class="mark">▶</span>Mike<span class="grad-text">Video</span></div>
   <div class="spacer"></div>
-  <div class="keyfield">
+  <div class="keyfield" id="keyfield">
+    <span class="dot"></span>
     <input id="apikey" type="password" placeholder="paste your X-API-KEY" autocomplete="off">
-    <button class="ghost" id="savekey">Save</button>
+    <button class="ghost" id="savekey">Connect</button>
   </div>
 </header>
 
 <main>
   <div class="drop" id="drop">
-    <div><b>Drop a video here</b> or click to choose — it uploads in chunks (never loads the whole file).</div>
+    <div class="up-ic">↑</div>
+    <div class="big"><b>Drop a video</b> to share it</div>
     <input type="file" id="file" accept="video/*" style="display:none">
+    <small>Or click to choose — it uploads in chunks, so even big files never overload your device.</small>
   </div>
   <div id="uploads"></div>
 
-  <h2>Your library</h2>
+  <div class="sec-head"><h2>Your library</h2><span class="count" id="count"></span></div>
   <div id="lib" class="grid"></div>
   <div id="libempty" class="empty" style="display:none">No videos yet. Drop one above to get started.</div>
 </main>
 
 <div id="watch">
   <div class="wbar">
-    <button class="ghost" id="back">&larr; Library</button>
-    <div id="wtitle" style="font-weight:600"></div>
+    <button class="ghost" id="back">← Library</button>
+    <div id="wtitle"></div>
     <div class="spacer"></div>
     <div class="hint" id="whint"></div>
   </div>
   <div id="player"></div>
+</div>
 </div>
 
 <script src="/hls.js"></script>
@@ -363,6 +417,19 @@ drop.addEventListener('drop',e=>{ const f=e.dataTransfer.files[0]; if(f) uploadF
 // poll library so encoding->ready flips live
 loadLibrary();
 setInterval(loadLibrary, 8000);
+</script>
+<script>
+(function(){
+  var kf=document.getElementById('keyfield'),input=document.getElementById('apikey'),
+      save=document.getElementById('savekey'),lib=document.getElementById('lib'),
+      count=document.getElementById('count');
+  function refl(){ kf.classList.toggle('on', !!input.value.trim()); }
+  function recount(){ var n=lib.querySelectorAll('.card').length;
+    count.textContent = n ? (n+' video'+(n>1?'s':'')) : ''; }
+  refl(); save.addEventListener('click',refl); input.addEventListener('input',refl);
+  new MutationObserver(recount).observe(lib,{childList:true});
+  setInterval(recount, 1000);
+})();
 </script>
 </body>
 </html>
