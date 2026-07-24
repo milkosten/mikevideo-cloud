@@ -31,7 +31,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config, db
+from . import config, db, transcribe
 
 logger = logging.getLogger(__name__)
 
@@ -431,6 +431,11 @@ async def _encode_one(video_id: str) -> None:
                              a.display_width, a.display_height)
 
     await _set_status(video_id, "ready", error=None, **a.db_cols())
+
+    # Kick off voice→text in its own background worker (never blocks encoding).
+    # Only clips with an audio stream — silent ones are skipped. See server/transcribe.py.
+    if a.has_audio:
+        transcribe.enqueue(video_id)
 
     # Delete the ingest temp session dir (blob already moved out). Safe no-op on re-encode.
     try:

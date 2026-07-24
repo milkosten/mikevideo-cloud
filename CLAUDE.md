@@ -55,9 +55,21 @@ that attribute, so portrait videos rendered sideways / "only the upper part." **
   audio_sample_rate, color_*, is_hdr, probe jsonb` (`width/height` stay = coded). `server/db.py`
   registers a json/jsonb codec so `probe` round-trips as a Python dict.
 
+## Speech → text (voice transcription — `server/transcribe.py`, `docs/SPEECH-PIPELINE.md`)
+Own background worker (separate queue from encode, so it NEVER blocks encoding). After a video goes
+`ready` with `has_audio`, it: ffmpeg-breaks-out a 16 kHz mono WAV (paths only) → runs
+`scripts/transcribe.py` (**faster-whisper `large-v3`, int8, CPU**) as a subprocess → stores the
+detected **language + timestamped segments + plain text** and writes a **WebVTT** caption file. LID is
+folded into ASR (no separate model). **Quality-first**: this is background batch — slow is fine; it's
+capped to `ASR_CPU_THREADS` (default 4) to stay gentle on the OSM stack. Schema:
+`migrations/003_transcripts.sql` (`videos.spoken_language/transcript_status/…` + a `transcripts`
+table). Startup `requeue_and_backfill()` transcribes existing `ready`+`has_audio` videos. Ollama can
+NOT do ASR — the free GPU (qwen3) is for the *downstream* AI layer (titles/tags/summaries) in Phase C.
+
 ## Endpoints
 `GET /api/health` · `POST /api/videos` · `POST /api/internal/complete` · `GET /api/videos` ·
-`GET /api/videos/{id}` · `GET /media/{user_id}/{video_id}/{path}` · `GET /` (web app) · `GET /hls.js`.
+`GET /api/videos/{id}` · `GET /api/videos/{id}/transcript` · `GET /media/{user_id}/{video_id}/{path}`
+(incl. `captions/{lang}.vtt`) · `GET /` (web app) · `GET /hls.js`.
 `GET /api/videos` and `/api/videos/{id}` now return the metadata above — **clients must use
 `display_width/height` (not `width/height`) for anything the viewer sees.**
 

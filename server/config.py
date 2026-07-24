@@ -27,3 +27,16 @@ TICKET_TTL_SECONDS = int(os.environ.get("TICKET_TTL_SECONDS", str(6 * 3600)))
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024 * 1024)))
 
 PORT = int(os.environ.get("PORT", "8090"))
+
+# --- Speech → text (see docs/SPEECH-PIPELINE.md) ---------------------------
+# Quality-first, CPU-only, background. large-v3 via faster-whisper (int8).
+ASR_ENABLED = os.environ.get("ASR_ENABLED", "true").lower() not in ("0", "false", "no")
+ASR_MODEL = os.environ.get("ASR_MODEL", "large-v3")
+ASR_COMPUTE_TYPE = os.environ.get("ASR_COMPUTE_TYPE", "int8")
+ASR_BEAM_SIZE = int(os.environ.get("ASR_BEAM_SIZE", "5"))
+# Cap CPU threads so transcription stays a gentle neighbour to the OSM stack on the box.
+ASR_CPU_THREADS = int(os.environ.get("ASR_CPU_THREADS", "4"))
+# Model weights cache — on the /data volume so container rebuilds don't re-download.
+ASR_MODEL_CACHE = Path(os.environ.get("ASR_MODEL_CACHE", str(DATA_ROOT / "models")))
+# Force a language code (e.g. "en"), or empty = auto-detect (LID folded into ASR).
+ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")

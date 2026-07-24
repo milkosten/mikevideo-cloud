@@ -8,6 +8,7 @@ Guard rails: ISO-8601 timestamps, parameterized SQL, never-trust-200,
 never load a whole file into RAM (ffmpeg streams; media served with byte-range).
 """
 import asyncio
+import json
 import logging
 import mimetypes
 import os
@@ -18,7 +19,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, Response, StreamingResponse
 
-from . import config, db, encode
+from . import config, db, encode, transcribe
 from .identity import resolve_agent_key
 from .tickets import mint_ticket, verify_callback_signature
 
@@ -97,6 +98,9 @@ async def _startup():
     # Backfill analysis for pre-existing videos in the background (idempotent;
     # re-encodes only the rotated / non-16:9 ones). Never blocks startup.
     asyncio.create_task(encode.backfill_metadata())
+    # Voice→text runs in its own background worker (never blocks encoding).
+    asyncio.create_task(transcribe.worker_loop())
+    asyncio.create_task(transcribe.requeue_and_backfill())
     logger.info("mikevideo-cloud started")
 
 
@@ -225,7 +229,8 @@ async def list_videos(request: Request):
     rows = await db.pool().fetch(
         "SELECT id, filename, status, duration_sec, width, height,"
         " display_width, display_height, orientation, aspect_ratio, rotation,"
-        " fps, has_audio, bytes, taken_at, created_at FROM mikevideo.videos"
+        " fps, has_audio, spoken_language, transcript_status, bytes,"
+        " taken_at, created_at FROM mikevideo.videos"
         " WHERE user_id=$1 ORDER BY created_at DESC LIMIT 500", user_id)
     out = []
     for r in rows:
@@ -244,6 +249,8 @@ async def list_videos(request: Request):
             "rotation": r["rotation"],
             "fps": r["fps"],
             "has_audio": r["has_audio"],
+            "spoken_language": r["spoken_language"],
+            "transcript_status": r["transcript_status"],
             "bytes": r["bytes"],
             "thumb_url": _thumb_url(user_id, vid) if r["status"] == "ready" else None,
             "taken_at": _iso(r["taken_at"]),
@@ -270,12 +277,14 @@ async def get_video(video_id: str, request: Request):
         " rotation, video_codec, audio_codec, pix_fmt, fps, video_bitrate,"
         " audio_bitrate, overall_bitrate, has_audio, audio_channels,"
         " audio_sample_rate, color_primaries, color_transfer, color_space,"
-        " is_hdr, bytes, taken_at, created_at FROM mikevideo.videos"
+        " is_hdr, spoken_language, language_confidence, transcript_status,"
+        " has_speech, bytes, taken_at, created_at FROM mikevideo.videos"
         " WHERE id=$1 AND user_id=$2", vid, user_id)
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     base = f"/media/{user_id}/{video_id}"
     ready = r["status"] == "ready"
+    captions_ready = r["transcript_status"] == "ready"
     return {
         "id": video_id,
         "filename": r["filename"],
@@ -304,12 +313,50 @@ async def get_video(video_id: str, request: Request):
         "color_transfer": r["color_transfer"],
         "color_space": r["color_space"],
         "is_hdr": r["is_hdr"],
+        "spoken_language": r["spoken_language"],
+        "language_confidence": r["language_confidence"],
+        "transcript_status": r["transcript_status"],
+        "has_speech": r["has_speech"],
         "bytes": r["bytes"],
         "hls_url": f"{base}/hls/master.m3u8" if ready else None,
         "mp4_url": f"{base}/video.mp4" if ready else None,
         "thumb_url": f"{base}/thumb.jpg" if ready else None,
+        "captions_url": f"{base}/captions/{r['spoken_language'] or 'und'}.vtt" if captions_ready else None,
         "taken_at": _iso(r["taken_at"]),
         "created_at": _iso(r["created_at"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/videos/{id}/transcript — the full transcript (segments + text)
+# ---------------------------------------------------------------------------
+@app.get("/api/videos/{video_id}/transcript")
+async def get_transcript(video_id: str, request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        vid = uuid.UUID(video_id)
+    except ValueError:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    # Scope to the owner via the videos row, then read the transcript.
+    r = await db.pool().fetchrow(
+        "SELECT t.language, t.plain_text, t.segments, t.word_count, t.model, t.duration_sec"
+        " FROM mikevideo.transcripts t JOIN mikevideo.videos v ON v.id=t.video_id"
+        " WHERE t.video_id=$1 AND v.user_id=$2", vid, user_id)
+    if r is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    segments = r["segments"]
+    if isinstance(segments, str):
+        segments = json.loads(segments)
+    return {
+        "video_id": video_id,
+        "language": r["language"],
+        "text": r["plain_text"],
+        "word_count": r["word_count"],
+        "model": r["model"],
+        "duration_sec": r["duration_sec"],
+        "segments": segments,
     }
 
 
@@ -345,6 +392,8 @@ def _range_response(path: Path, request: Request) -> Response:
         ctype = "application/vnd.apple.mpegurl"
     elif path.suffix == ".ts":
         ctype = "video/mp2t"
+    elif path.suffix == ".vtt":
+        ctype = "text/vtt"
     range_header = request.headers.get("range")
     headers = {"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=3600"}
     if not range_header:

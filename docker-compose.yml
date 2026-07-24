@@ -27,6 +27,10 @@ services:
       DATA_ROOT: /data/mikevideo
       INGEST_DATA_ROOT: /data/mikevideo/ingest
       DATABASE_URL: postgres://mikevideo:${POSTGRES_PASSWORD:-mikevideo}@mikevideo-postgres:5432/mikevideo
+      # Whisper model weights cache on the persistent /data volume (not the container fs),
+      # so a rebuild never re-downloads the ~1.5 GB large-v3 model.
+      ASR_MODEL_CACHE: /data/mikevideo/models
+      HF_HOME: /data/mikevideo/models/hf
     volumes:
       # Shared with ingest: cloud reads .../ingest/{upload_id}/data.bin after the
       # callback, moves it out, and writes renditions under /data/mikevideo/{user}/{video}/.

@@ -3,3 +3,7 @@ uvicorn[standard]==0.30.1
 asyncpg==0.29.0
 httpx==0.27.0
 python-multipart==0.0.9
+# Speech→text (docs/SPEECH-PIPELINE.md). CPU int8 via CTranslate2 — pulls
+# ctranslate2 + onnxruntime (Silero VAD) + av; NO torch. Runs only in the
+# scripts/transcribe.py subprocess, never in the API process.
+faster-whisper==1.1.1
