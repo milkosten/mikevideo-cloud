@@ -82,10 +82,15 @@
   .card:hover{transform:translateY(-4px);border-color:#3c3550;box-shadow:0 24px 44px -28px rgba(0,0,0,.85)}
   .thumb{position:relative;aspect-ratio:16/9;background:#0f0b13 center/cover no-repeat;display:flex;
     align-items:center;justify-content:center}
+  .thumb.portrait{background-size:contain;background-color:#0b0810}
   .thumb .ph{color:#4a4356;font-size:30px}
   .thumb::after{content:"\25B6";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
     font-size:18px;color:#fff;background:rgba(15,11,19,.42);opacity:0;transition:.18s}
   .card:hover .thumb::after{opacity:1}
+  .badge{position:absolute;right:8px;bottom:8px;background:rgba(6,4,9,.82);color:#fff;font-size:11px;
+    font-weight:700;padding:2px 7px;border-radius:6px;letter-spacing:.02em;line-height:1.5}
+  .otag{position:absolute;left:8px;top:8px;background:rgba(6,4,9,.72);color:var(--muted);font-size:10px;
+    font-weight:700;padding:2px 7px;border-radius:6px;text-transform:uppercase;letter-spacing:.04em}
   .meta{padding:13px 14px 15px}
   .title{font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .sub{color:var(--muted);font-size:12.5px;margin-top:8px;display:flex;gap:9px;align-items:center}
@@ -103,8 +108,13 @@
   .wbar{display:flex;align-items:center;gap:14px;padding:13px 20px;border-bottom:1px solid var(--line);
     background:rgba(10,7,9,.82);backdrop-filter:blur(8px)}
   #wtitle{font-family:var(--disp);font-weight:400;font-size:18px;letter-spacing:-.01em}
-  #player{flex:1;width:100%;background:#000;display:flex}
-  video{width:100%;height:100%;object-fit:contain;background:#000}
+  #player{flex:1;min-height:0;width:100%;background:#000;display:grid;place-items:center;overflow:hidden}
+  /* Show the WHOLE frame at its natural aspect (portrait or landscape), centered,
+     never overflowing — bulletproof for any geometry now the backend is correct. */
+  video{max-width:100%;max-height:100%;width:auto;height:auto;background:#000;display:block}
+  #wmeta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+  #wmeta .m{font-size:12px;color:var(--muted);background:var(--bg2);border:1px solid var(--line);
+    padding:3px 9px;border-radius:20px;font-weight:600;white-space:nowrap}
 
   @media(max-width:640px){
     header{flex-wrap:wrap;gap:10px;padding:14px 16px}
@@ -146,7 +156,7 @@
     <button class="ghost" id="back">← Library</button>
     <div id="wtitle"></div>
     <div class="spacer"></div>
-    <div class="hint" id="whint"></div>
+    <div id="wmeta"></div>
   </div>
   <div id="player"></div>
 </div>
@@ -159,7 +169,11 @@ let API_KEY = localStorage.getItem('mikevideo_key') || '';
 document.getElementById('apikey').value = API_KEY;
 
 function hdr(extra){ const h = Object.assign({'X-API-KEY':API_KEY}, extra||{}); return h; }
-function fmtDur(s){ if(!s) return ''; s=Math.round(s); const m=(s/60)|0, ss=('0'+(s%60)).slice(-2); return m+':'+ss; }
+function fmtDur(s){ if(!s) return ''; s=Math.round(s); const h=(s/3600)|0, m=((s%3600)/60)|0, ss=('0'+(s%60)).slice(-2);
+  return h ? (h+':'+('0'+m).slice(-2)+':'+ss) : (m+':'+ss); }
+function fmtBytes(b){ if(!b) return ''; const u=['B','KB','MB','GB','TB']; let i=0; b=+b;
+  while(b>=1024&&i<u.length-1){b/=1024;i++;} return (b>=100||i===0?Math.round(b):b.toFixed(1))+' '+u[i]; }
+function dispDims(v){ const w=v.display_width||v.width, h=v.display_height||v.height; return (w&&h)?(w+'×'+h):''; }
 
 document.getElementById('savekey').onclick = ()=>{
   API_KEY = document.getElementById('apikey').value.trim();
@@ -366,8 +380,12 @@ async function loadLibrary(){
     empty.style.display='none';
     for(const v of videos){
       const c=document.createElement('div'); c.className='card';
-      const thumb=v.thumb_url?`style="background-image:url('${v.thumb_url}')"`:'';
-      c.innerHTML=`<div class="thumb" ${thumb}>${v.thumb_url?'':'<span class="ph">▶</span>'}</div>
+      const portrait = v.orientation==='portrait';
+      const thumbStyle=v.thumb_url?`style="background-image:url('${v.thumb_url}')"`:'';
+      const dur=v.duration_sec?`<span class="badge">${fmtDur(v.duration_sec)}</span>`:'';
+      const dims=dispDims(v); const otag=dims?`<span class="otag">${dims}</span>`:'';
+      c.innerHTML=`<div class="thumb ${portrait?'portrait':''}" ${thumbStyle}>
+          ${v.thumb_url?'':'<span class="ph">▶</span>'}${v.status==='ready'?otag+dur:''}</div>
         <div class="meta"><div class="title">${v.filename}</div>
         <div class="sub"><span class="chip ${v.status}">${v.status}</span>
         <span>${fmtDur(v.duration_sec)}</span></div></div>`;
@@ -384,9 +402,19 @@ async function openWatch(id,title){
   if(!r.ok){ alert('cannot open'); return; }
   const v=await r.json();
   document.getElementById('wtitle').textContent=title;
-  document.getElementById('whint').textContent=(v.width&&v.height)?`${v.width}×${v.height} · ${fmtDur(v.duration_sec)}`:'';
+  // Metadata readout: resolution · fps · codec · duration · size.
+  const chips=[];
+  const dims=dispDims(v); if(dims) chips.push(dims+(v.orientation?' '+v.orientation:''));
+  if(v.fps) chips.push(Math.round(v.fps)+' fps');
+  if(v.video_codec) chips.push(v.video_codec.toUpperCase()+(v.has_audio&&v.audio_codec?' · '+v.audio_codec.toUpperCase():' · silent'));
+  if(v.is_hdr) chips.push('HDR');
+  if(v.duration_sec) chips.push(fmtDur(v.duration_sec));
+  if(v.bytes) chips.push(fmtBytes(v.bytes));
+  document.getElementById('wmeta').innerHTML=chips.map(c=>`<span class="m">${c}</span>`).join('');
   const player=document.getElementById('player'); player.innerHTML='';
-  const video=document.createElement('video'); video.controls=true; video.autoplay=true;
+  const video=document.createElement('video'); video.controls=true; video.autoplay=true; video.playsInline=true;
+  // Hint the natural aspect so the box is correct even before the first frame decodes.
+  if(v.display_width&&v.display_height) video.style.aspectRatio=v.display_width+' / '+v.display_height;
   if(v.thumb_url) video.poster=v.thumb_url;
   player.appendChild(video);
   if(hls){hls.destroy();hls=null;}

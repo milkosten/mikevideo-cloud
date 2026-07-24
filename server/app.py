@@ -94,6 +94,9 @@ async def _startup():
     await db.migrate()
     asyncio.create_task(encode.worker_loop())
     await encode.requeue_pending()
+    # Backfill analysis for pre-existing videos in the background (idempotent;
+    # re-encodes only the rotated / non-16:9 ones). Never blocks startup.
+    asyncio.create_task(encode.backfill_metadata())
     logger.info("mikevideo-cloud started")
 
 
@@ -220,8 +223,9 @@ async def list_videos(request: Request):
     if not user_id:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     rows = await db.pool().fetch(
-        "SELECT id, filename, status, duration_sec, width, height, bytes,"
-        " taken_at, created_at FROM mikevideo.videos"
+        "SELECT id, filename, status, duration_sec, width, height,"
+        " display_width, display_height, orientation, aspect_ratio, rotation,"
+        " fps, has_audio, bytes, taken_at, created_at FROM mikevideo.videos"
         " WHERE user_id=$1 ORDER BY created_at DESC LIMIT 500", user_id)
     out = []
     for r in rows:
@@ -233,6 +237,13 @@ async def list_videos(request: Request):
             "duration_sec": r["duration_sec"],
             "width": r["width"],
             "height": r["height"],
+            "display_width": r["display_width"],
+            "display_height": r["display_height"],
+            "orientation": r["orientation"],
+            "aspect_ratio": r["aspect_ratio"],
+            "rotation": r["rotation"],
+            "fps": r["fps"],
+            "has_audio": r["has_audio"],
             "bytes": r["bytes"],
             "thumb_url": _thumb_url(user_id, vid) if r["status"] == "ready" else None,
             "taken_at": _iso(r["taken_at"]),
@@ -255,7 +266,11 @@ async def get_video(video_id: str, request: Request):
         return JSONResponse({"error": "bad id"}, status_code=400)
     r = await db.pool().fetchrow(
         "SELECT id, filename, content_type, status, error, duration_sec, width,"
-        " height, bytes, taken_at, created_at FROM mikevideo.videos"
+        " height, display_width, display_height, orientation, aspect_ratio,"
+        " rotation, video_codec, audio_codec, pix_fmt, fps, video_bitrate,"
+        " audio_bitrate, overall_bitrate, has_audio, audio_channels,"
+        " audio_sample_rate, color_primaries, color_transfer, color_space,"
+        " is_hdr, bytes, taken_at, created_at FROM mikevideo.videos"
         " WHERE id=$1 AND user_id=$2", vid, user_id)
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -270,6 +285,25 @@ async def get_video(video_id: str, request: Request):
         "duration_sec": r["duration_sec"],
         "width": r["width"],
         "height": r["height"],
+        "display_width": r["display_width"],
+        "display_height": r["display_height"],
+        "orientation": r["orientation"],
+        "aspect_ratio": r["aspect_ratio"],
+        "rotation": r["rotation"],
+        "video_codec": r["video_codec"],
+        "audio_codec": r["audio_codec"],
+        "pix_fmt": r["pix_fmt"],
+        "fps": r["fps"],
+        "video_bitrate": r["video_bitrate"],
+        "audio_bitrate": r["audio_bitrate"],
+        "overall_bitrate": r["overall_bitrate"],
+        "has_audio": r["has_audio"],
+        "audio_channels": r["audio_channels"],
+        "audio_sample_rate": r["audio_sample_rate"],
+        "color_primaries": r["color_primaries"],
+        "color_transfer": r["color_transfer"],
+        "color_space": r["color_space"],
+        "is_hdr": r["is_hdr"],
         "bytes": r["bytes"],
         "hls_url": f"{base}/hls/master.m3u8" if ready else None,
         "mp4_url": f"{base}/video.mp4" if ready else None,

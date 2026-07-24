@@ -1,4 +1,5 @@
 """asyncpg pool + idempotent self-migrator (tracked in mikevideo._migrations)."""
+import json
 import logging
 from pathlib import Path
 
@@ -12,11 +13,21 @@ _pool: asyncpg.Pool | None = None
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
+async def _init_conn(con: asyncpg.Connection) -> None:
+    """Every pooled connection encodes/decodes json & jsonb as Python objects,
+    so we can pass dicts straight into a jsonb column (e.g. the ffprobe dump)."""
+    await con.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads,
+                             schema="pg_catalog")
+    await con.set_type_codec("json", encoder=json.dumps, decoder=json.loads,
+                             schema="pg_catalog")
+
+
 async def connect() -> asyncpg.Pool:
     global _pool
     if _pool is None:
         _pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1,
-                                          max_size=8, command_timeout=60)
+                                          max_size=8, command_timeout=60,
+                                          init=_init_conn)
     return _pool
 
 
