@@ -20,7 +20,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import config, db
+from . import config, db, enrich
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +180,9 @@ async def _transcribe_one(video_id: str) -> None:
         video_id, language, confidence)
     logger.info("transcribe: %s READY lang=%s conf=%.2f words=%d",
                 video_id, language, confidence or 0.0, word_count)
+
+    # Hand off to the AI layer (Phase C) — best-effort, never blocks.
+    enrich.enqueue(video_id)
 
 
 async def worker_loop() -> None:

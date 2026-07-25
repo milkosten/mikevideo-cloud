@@ -40,3 +40,11 @@ ASR_CPU_THREADS = int(os.environ.get("ASR_CPU_THREADS", "4"))
 ASR_MODEL_CACHE = Path(os.environ.get("ASR_MODEL_CACHE", str(DATA_ROOT / "models")))
 # Force a language code (e.g. "en"), or empty = auto-detect (LID folded into ASR).
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
+
+# --- Phase C: AI enrichment via the free GPU brain (see docs/SPEECH-PIPELINE.md) ---
+# The fleet-wide "a free GPU brain exists here" URL, carrying host+port+creds:
+#   ollama://<user>:<pass>@host:port   (ollamas:// or ollama:// ⇒ https + basic auth;
+#   ollama+http:// forces plain http). Empty ⇒ enrichment stays dormant (pending).
+OLLAMA_GPU_URL = os.environ.get("OLLAMA_GPU_URL", "")
+OLLAMA_GPU_MODEL = os.environ.get("OLLAMA_GPU_MODEL", "qwen3:8b")
+ENRICH_ENABLED = os.environ.get("ENRICH_ENABLED", "true").lower() not in ("0", "false", "no")

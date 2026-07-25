@@ -12,6 +12,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +20,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, Response, StreamingResponse
 
-from . import config, db, encode, transcribe
+from . import config, db, encode, transcribe, enrich
 from .identity import resolve_agent_key
 from .tickets import mint_ticket, verify_callback_signature
 
@@ -43,6 +44,19 @@ def _iso(dt) -> str | None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).isoformat()
     return str(dt)
+
+
+def _jsonb(v):
+    """jsonb column → Python object. The pool registers a jsonb codec so this is
+    usually already parsed; tolerate a raw string just in case."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except Exception:
+            return None
+    return v
 
 
 def _parse_ts(v):
@@ -101,6 +115,9 @@ async def _startup():
     # Voice→text runs in its own background worker (never blocks encoding).
     asyncio.create_task(transcribe.worker_loop())
     asyncio.create_task(transcribe.requeue_and_backfill())
+    # AI enrichment (Phase C) — own worker + a retry sweep for the flaky GPU.
+    asyncio.create_task(enrich.worker_loop())
+    asyncio.create_task(enrich.retry_loop())
     logger.info("mikevideo-cloud started")
 
 
@@ -229,8 +246,8 @@ async def list_videos(request: Request):
     rows = await db.pool().fetch(
         "SELECT id, filename, status, duration_sec, width, height,"
         " display_width, display_height, orientation, aspect_ratio, rotation,"
-        " fps, has_audio, spoken_language, transcript_status, bytes,"
-        " taken_at, created_at FROM mikevideo.videos"
+        " fps, has_audio, spoken_language, transcript_status, ai_title,"
+        " enrich_status, bytes, taken_at, created_at FROM mikevideo.videos"
         " WHERE user_id=$1 ORDER BY created_at DESC LIMIT 500", user_id)
     out = []
     for r in rows:
@@ -251,6 +268,8 @@ async def list_videos(request: Request):
             "has_audio": r["has_audio"],
             "spoken_language": r["spoken_language"],
             "transcript_status": r["transcript_status"],
+            "ai_title": r["ai_title"],
+            "enrich_status": r["enrich_status"],
             "bytes": r["bytes"],
             "thumb_url": _thumb_url(user_id, vid) if r["status"] == "ready" else None,
             "taken_at": _iso(r["taken_at"]),
@@ -278,7 +297,8 @@ async def get_video(video_id: str, request: Request):
         " audio_bitrate, overall_bitrate, has_audio, audio_channels,"
         " audio_sample_rate, color_primaries, color_transfer, color_space,"
         " is_hdr, spoken_language, language_confidence, transcript_status,"
-        " has_speech, bytes, taken_at, created_at FROM mikevideo.videos"
+        " has_speech, ai_title, ai_summary, ai_tags, ai_chapters, enrich_status,"
+        " bytes, taken_at, created_at FROM mikevideo.videos"
         " WHERE id=$1 AND user_id=$2", vid, user_id)
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -317,6 +337,11 @@ async def get_video(video_id: str, request: Request):
         "language_confidence": r["language_confidence"],
         "transcript_status": r["transcript_status"],
         "has_speech": r["has_speech"],
+        "ai_title": r["ai_title"],
+        "ai_summary": r["ai_summary"],
+        "ai_tags": list(r["ai_tags"]) if r["ai_tags"] else None,
+        "ai_chapters": _jsonb(r["ai_chapters"]),
+        "enrich_status": r["enrich_status"],
         "bytes": r["bytes"],
         "hls_url": f"{base}/hls/master.m3u8" if ready else None,
         "mp4_url": f"{base}/video.mp4" if ready else None,
@@ -358,6 +383,55 @@ async def get_transcript(video_id: str, request: Request):
         "duration_sec": r["duration_sec"],
         "segments": segments,
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/search?q=... — full-text search over the user's transcripts.
+# Returns matching videos + the best matching segment (with a timestamp) so the
+# client can deep-link straight to the spoken moment.
+# ---------------------------------------------------------------------------
+def _best_segment(segments, terms: list[str]) -> dict | None:
+    """First segment whose text contains any query term (case-insensitive)."""
+    if not segments:
+        return None
+    for seg in segments:
+        low = (seg.get("text") or "").lower()
+        if any(t in low for t in terms):
+            return {"start": float(seg.get("start") or 0), "text": (seg.get("text") or "").strip()}
+    first = segments[0]
+    return {"start": float(first.get("start") or 0), "text": (first.get("text") or "").strip()}
+
+
+@app.get("/api/search")
+async def search(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    q = (request.query_params.get("q") or "").strip()
+    if not q:
+        return {"query": "", "results": []}
+    rows = await db.pool().fetch(
+        "SELECT v.id, v.filename, v.spoken_language, v.ai_title, v.duration_sec,"
+        "       t.plain_text, t.segments,"
+        "       ts_rank(t.search_tsv, websearch_to_tsquery('simple', $2)) AS rank"
+        " FROM mikevideo.transcripts t JOIN mikevideo.videos v ON v.id=t.video_id"
+        " WHERE v.user_id=$1 AND t.search_tsv @@ websearch_to_tsquery('simple', $2)"
+        " ORDER BY rank DESC LIMIT 50", user_id, q)
+    terms = [w.lower() for w in re.findall(r"\w+", q, flags=re.UNICODE) if len(w) > 1]
+    results = []
+    for r in rows:
+        vid = str(r["id"])
+        segments = _jsonb(r["segments"]) or []
+        results.append({
+            "id": vid,
+            "title": r["ai_title"] or r["filename"],
+            "language": r["spoken_language"],
+            "duration_sec": r["duration_sec"],
+            "thumb_url": _thumb_url(user_id, vid),
+            "match": _best_segment(segments, terms),
+            "rank": float(r["rank"]) if r["rank"] is not None else 0.0,
+        })
+    return {"query": q, "results": results}
 
 
 # ---------------------------------------------------------------------------
