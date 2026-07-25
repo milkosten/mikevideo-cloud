@@ -82,17 +82,25 @@ Audio breakout + built-in LID + `large-v3` transcript + WebVTT, in a background 
 `has_audio`. Delivers: **detected language, full transcript, subtitle file, searchable text.** This is
 the foundation and the bulk of the value.
 
-### Phase B — Surface it
-- Web + app players load the `captions/{lang}.vtt` track; show the detected language.
-- **Full-text search** over transcripts: a Postgres `tsvector` (generated column + GIN index) with a
-  language-aware config; `GET /api/search?q=` returns matching videos + the timestamped segment, so a
-  hit deep-links into the video (word timestamps make click-to-seek exact).
+### Phase B — Surface it  ← **SHIPPED**
+- Web + app players load the `captions/{lang}.vtt` track (WebVTT `<track>` / ExoPlayer
+  `SubtitleConfiguration`), default-selected, with a CC toggle.
+- **Full-text search** over transcripts: migration `004` adds a generated `search_tsv` (`simple`
+  config, multilingual) + GIN index; `GET /api/search?q=` returns matching videos + the best
+  timestamped segment, so a hit **deep-links straight to the spoken moment** (web + app).
 
-### Phase C — The AI layer (free GPU brain)
-Feed the transcript to the fleet GPU (`OLLAMA_GPU_URL`, qwen3) for **auto-title, tags, summary, and
-chapters** — this is the "YouTube layer" (Phase 4 in `services/video.md`). Ollama does the *text*
-reasoning; it **cannot** do ASR (LLM/vision only), which is exactly why ASR stays on the CPU box.
-Optional here: speaker **diarization** (pyannote, for multi-speaker clips) via WhisperX.
+### Phase C — The AI layer (free GPU brain)  ← **BUILT; dormant until `OLLAMA_GPU_URL` is set**
+`server/enrich.py`: own background worker + 15-min retry sweep. Feeds the timestamped transcript to
+the fleet GPU (`OLLAMA_GPU_URL`, qwen3, `/api/chat` JSON mode) → **auto-title, summary, tags,
+chapters** (videos.ai_*). **Resilient**: if the flaky GPU is unreachable it leaves `enrich_status =
+pending` and retries — nothing blocks. Ollama does the *text* reasoning; it **cannot** do ASR (LLM/
+vision only), which is exactly why ASR stays on the CPU box. The web + app already render the AI
+title/summary/tags/clickable-chapters (they fall back to the capture date until enrichment runs).
+Optional later: speaker **diarization** (pyannote, multi-speaker) via WhisperX.
+
+**To activate C:** set `OLLAMA_GPU_URL=ollama://mikeos:<pass>@81.8.177.182:11443` in
+`/root/mikevideo-cloud/.env` on the box and `docker compose up -d mikevideo-cloud` — the retry sweep
+enriches the backlog automatically.
 
 ### Phase D — GPU ASR offload (only if volume grows)
 Stand up a faster-whisper (or NeMo Canary/Parakeet) service on the GPU box behind an
