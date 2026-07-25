@@ -89,7 +89,7 @@ the foundation and the bulk of the value.
   config, multilingual) + GIN index; `GET /api/search?q=` returns matching videos + the best
   timestamped segment, so a hit **deep-links straight to the spoken moment** (web + app).
 
-### Phase C — The AI layer (free GPU brain)  ← **BUILT; dormant until `OLLAMA_GPU_URL` is set**
+### Phase C — The AI layer (free GPU brain)  ← **LIVE** (activated 2026-07-25; `OLLAMA_GPU_URL` set on the box)
 `server/enrich.py`: own background worker + 15-min retry sweep. Feeds the timestamped transcript to
 the fleet GPU (`OLLAMA_GPU_URL`, qwen3, `/api/chat` JSON mode) → **auto-title, summary, tags,
 chapters** (videos.ai_*). **Resilient**: if the flaky GPU is unreachable it leaves `enrich_status =
