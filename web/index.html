@@ -115,6 +115,37 @@
   #wmeta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
   #wmeta .m{font-size:12px;color:var(--muted);background:var(--bg2);border:1px solid var(--line);
     padding:3px 9px;border-radius:20px;font-weight:600;white-space:nowrap}
+  video::cue{background:rgba(6,4,9,.72);color:#fff;font-family:var(--sans);font-size:.9em;line-height:1.4}
+
+  /* AI info panel under the player */
+  #winfo{max-height:34vh;overflow:auto;padding:14px 20px;border-top:1px solid var(--line);
+    background:rgba(15,11,19,.92);color:var(--ink)}
+  #winfo.hide{display:none}
+  #winfo .sum{color:var(--muted);font-size:13.5px;line-height:1.5;margin-bottom:10px}
+  #winfo .tags{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px}
+  #winfo .tag{font-size:11.5px;color:var(--peri);background:rgba(124,124,255,.12);
+    border:1px solid rgba(124,124,255,.28);padding:3px 10px;border-radius:20px}
+  #winfo .chap{display:flex;gap:12px;align-items:baseline;padding:6px 8px;border-radius:8px;cursor:pointer}
+  #winfo .chap:hover{background:var(--bg2)}
+  #winfo .chap .t{color:var(--rose);font-variant-numeric:tabular-nums;font-size:12.5px;font-weight:700;min-width:52px}
+  #winfo .chap .c{color:var(--ink);font-size:13.5px}
+  #winfo h4{margin:0 0 8px;font-size:11px;letter-spacing:1px;color:var(--faint);font-weight:800;text-transform:uppercase}
+
+  /* Search */
+  .search{position:relative;margin:0 0 22px}
+  .search input{width:100%;background:var(--bg2);border:1px solid var(--line);color:var(--ink);
+    padding:13px 15px 13px 42px;border-radius:14px;font-size:15px}
+  .search .ic{position:absolute;left:15px;top:50%;transform:translateY(-50%);color:var(--faint);font-size:16px}
+  #results{display:flex;flex-direction:column;gap:10px;margin-bottom:26px}
+  .res{display:flex;gap:13px;background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:10px;cursor:pointer;transition:border-color .15s}
+  .res:hover{border-color:var(--peri)}
+  .res .rt{width:104px;aspect-ratio:16/9;border-radius:9px;background:#0f0b13 center/cover no-repeat;flex:none}
+  .res .rb{min-width:0;flex:1}
+  .res .rtitle{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .res .rsnip{color:var(--muted);font-size:12.5px;margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;
+    -webkit-box-orient:vertical;overflow:hidden}
+  .res .rstamp{color:var(--rose);font-weight:700;font-variant-numeric:tabular-nums}
 
   @media(max-width:640px){
     header{flex-wrap:wrap;gap:10px;padding:14px 16px}
@@ -146,6 +177,12 @@
   </div>
   <div id="uploads"></div>
 
+  <div class="search">
+    <span class="ic">⌕</span>
+    <input id="q" type="search" placeholder="Search what was said in your videos…" autocomplete="off">
+  </div>
+  <div id="results"></div>
+
   <div class="sec-head"><h2>Your library</h2><span class="count" id="count"></span></div>
   <div id="lib" class="grid"></div>
   <div id="libempty" class="empty" style="display:none">No videos yet. Drop one above to get started.</div>
@@ -159,6 +196,7 @@
     <div id="wmeta"></div>
   </div>
   <div id="player"></div>
+  <div id="winfo" class="hide"></div>
 </div>
 </div>
 
@@ -386,10 +424,10 @@ async function loadLibrary(){
       const dims=dispDims(v); const otag=dims?`<span class="otag">${dims}</span>`:'';
       c.innerHTML=`<div class="thumb ${portrait?'portrait':''}" ${thumbStyle}>
           ${v.thumb_url?'':'<span class="ph">▶</span>'}${v.status==='ready'?otag+dur:''}</div>
-        <div class="meta"><div class="title">${v.filename}</div>
+        <div class="meta"><div class="title">${esc(v.ai_title||v.filename)}</div>
         <div class="sub"><span class="chip ${v.status}">${v.status}</span>
-        <span>${fmtDur(v.duration_sec)}</span></div></div>`;
-      if(v.status==='ready') c.onclick=()=>openWatch(v.id,v.filename);
+        <span>${fmtDur(v.duration_sec)}</span>${v.spoken_language?`<span title="has subtitles">CC · ${v.spoken_language.toUpperCase()}</span>`:''}</div></div>`;
+      if(v.status==='ready') c.onclick=()=>openWatch(v.id);
       lib.appendChild(c);
     }
   }catch(e){ console.error(e); }
@@ -397,26 +435,45 @@ async function loadLibrary(){
 
 // ---- watch ----
 let hls=null;
-async function openWatch(id,title){
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function openWatch(id,_ignored,seekTo){
   const r=await fetch('/api/videos/'+id,{headers:hdr()});
   if(!r.ok){ alert('cannot open'); return; }
   const v=await r.json();
-  document.getElementById('wtitle').textContent=title;
+  document.getElementById('wtitle').textContent=v.ai_title||v.filename;
   // Metadata readout: resolution · fps · codec · duration · size.
   const chips=[];
   const dims=dispDims(v); if(dims) chips.push(dims+(v.orientation?' '+v.orientation:''));
   if(v.fps) chips.push(Math.round(v.fps)+' fps');
   if(v.video_codec) chips.push(v.video_codec.toUpperCase()+(v.has_audio&&v.audio_codec?' · '+v.audio_codec.toUpperCase():' · silent'));
+  if(v.spoken_language) chips.push('CC '+v.spoken_language.toUpperCase());
   if(v.is_hdr) chips.push('HDR');
   if(v.duration_sec) chips.push(fmtDur(v.duration_sec));
   if(v.bytes) chips.push(fmtBytes(v.bytes));
-  document.getElementById('wmeta').innerHTML=chips.map(c=>`<span class="m">${c}</span>`).join('');
+  document.getElementById('wmeta').innerHTML=chips.map(c=>`<span class="m">${esc(c)}</span>`).join('');
+
   const player=document.getElementById('player'); player.innerHTML='';
   const video=document.createElement('video'); video.controls=true; video.autoplay=true; video.playsInline=true;
-  // Hint the natural aspect so the box is correct even before the first frame decodes.
+  video.crossOrigin='anonymous';
   if(v.display_width&&v.display_height) video.style.aspectRatio=v.display_width+' / '+v.display_height;
   if(v.thumb_url) video.poster=v.thumb_url;
+  // Subtitles: a WebVTT track (Phase B). Same-origin /media, shows a CC toggle.
+  if(v.captions_url){
+    const tr=document.createElement('track');
+    tr.kind='subtitles'; tr.src=v.captions_url; tr.default=true;
+    tr.srclang=v.spoken_language||'und'; tr.label=(v.spoken_language||'CC').toUpperCase();
+    video.appendChild(tr);
+  }
   player.appendChild(video);
+
+  // Deep-link seek (from search): apply once metadata/first fragment is ready.
+  if(seekTo!=null && seekTo>0){
+    const doSeek=()=>{ try{ video.currentTime=seekTo; }catch(e){} };
+    video.addEventListener('loadedmetadata',doSeek,{once:true});
+    video.addEventListener('canplay',doSeek,{once:true});
+  }
+
   if(hls){hls.destroy();hls=null;}
   if(video.canPlayType('application/vnd.apple.mpegurl')){
     video.src=v.hls_url;                        // native HLS (Safari)
@@ -426,13 +483,59 @@ async function openWatch(id,title){
   }else{
     video.src=v.mp4_url;                         // fallback
   }
+
+  // AI info panel (Phase C): summary + tags + clickable chapters.
+  const info=document.getElementById('winfo'); info.innerHTML=''; info.classList.add('hide');
+  const bits=[];
+  if(v.ai_summary) bits.push(`<div class="sum">${esc(v.ai_summary)}</div>`);
+  if(v.ai_tags&&v.ai_tags.length) bits.push(`<div class="tags">${v.ai_tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>`);
+  if(v.ai_chapters&&v.ai_chapters.length){
+    bits.push('<h4>Chapters</h4>'+v.ai_chapters.map(ch=>
+      `<div class="chap" data-s="${Number(ch.start)||0}"><span class="t">${fmtDur(ch.start)}</span><span class="c">${esc(ch.title||'')}</span></div>`).join(''));
+  }
+  if(bits.length){
+    info.innerHTML=bits.join(''); info.classList.remove('hide');
+    info.querySelectorAll('.chap').forEach(el=>el.onclick=()=>{ const t=parseFloat(el.dataset.s)||0; try{video.currentTime=t; video.play();}catch(e){} });
+  }
   document.getElementById('watch').classList.add('on');
 }
 document.getElementById('back').onclick=()=>{
   document.getElementById('watch').classList.remove('on');
   const p=document.getElementById('player'); p.innerHTML=''; if(hls){hls.destroy();hls=null;}
+  const info=document.getElementById('winfo'); info.innerHTML=''; info.classList.add('hide');
   loadLibrary();
 };
+
+// ---- search (Phase B): full-text over what was SAID in your videos ----
+const qEl=document.getElementById('q'), resEl=document.getElementById('results');
+let searchTimer=null;
+qEl.addEventListener('input',()=>{
+  clearTimeout(searchTimer);
+  const q=qEl.value.trim();
+  if(!q){ resEl.innerHTML=''; return; }
+  searchTimer=setTimeout(()=>runSearch(q),300);
+});
+async function runSearch(q){
+  if(!API_KEY){ resEl.innerHTML=`<div class="hint" style="padding:6px 2px">Connect your key to search.</div>`; return; }
+  try{
+    const r=await fetch('/api/search?q='+encodeURIComponent(q),{headers:hdr()});
+    if(!r.ok){ resEl.innerHTML=''; return; }
+    const {results}=await r.json();
+    if(!results.length){ resEl.innerHTML=`<div class="hint" style="padding:6px 2px">No spoken matches for “${esc(q)}”.</div>`; return; }
+    resEl.innerHTML='';
+    for(const it of results){
+      const el=document.createElement('div'); el.className='res';
+      const thumb=it.thumb_url?`style="background-image:url('${it.thumb_url}')"`:'';
+      const stamp=it.match?`<span class="rstamp">${fmtDur(it.match.start)}</span> `:'';
+      const snip=it.match?esc(it.match.text):'';
+      el.innerHTML=`<div class="rt" ${thumb}></div><div class="rb">
+        <div class="rtitle">${esc(it.title)}${it.language?' · '+it.language.toUpperCase():''}</div>
+        <div class="rsnip">${stamp}${snip}</div></div>`;
+      el.onclick=()=>openWatch(it.id,null,it.match?it.match.start:0);
+      resEl.appendChild(el);
+    }
+  }catch(e){ console.error(e); }
+}
 
 // ---- drop zone wiring ----
 const drop=document.getElementById('drop'), fileInput=document.getElementById('file');
