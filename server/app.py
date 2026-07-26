@@ -842,6 +842,42 @@ async def home_feed(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/videos/{id}/related — the up-next rail (P7). Ranks other watchable
+# videos by tag overlap + same-channel + popularity + recency.
+# ---------------------------------------------------------------------------
+@app.get("/api/videos/{video_id}/related")
+async def related_videos(video_id: str, request: Request):
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    src = await db.pool().fetchrow(
+        "SELECT user_id, visibility, ai_tags FROM mikevideo.videos WHERE id=$1", vid)
+    if src is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    viewer = await authenticate(request)
+    if src["visibility"] != "public" and viewer != src["user_id"]:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    tags = [t.lower() for t in (src["ai_tags"] or [])]
+    owner = src["user_id"]
+    # Candidates: public ready videos, plus the viewer's own ready videos (so an
+    # owner watching a private clip still gets their library as up-next).
+    rows = await db.pool().fetch(
+        _CARD_SELECT +
+        " WHERE v.status='ready' AND v.id <> $1"
+        "   AND (v.visibility='public' OR v.user_id = $2)"
+        " ORDER BY ("
+        "     (SELECT count(*) FROM unnest(COALESCE(v.ai_tags, ARRAY[]::text[])) t"
+        "        WHERE lower(t) = ANY($3::text[])) * 10"
+        "   + (CASE WHEN v.user_id = $4 THEN 8 ELSE 0 END)"
+        "   + LEAST(COALESCE(v.view_count,0), 100) * 0.2"
+        "   + (SELECT count(*) FROM mikevideo.likes l WHERE l.video_id=v.id) * 3"
+        "   ) DESC, v.published_at DESC NULLS LAST, v.created_at DESC"
+        " LIMIT 20",
+        vid, viewer or "", tags, owner)
+    return {"videos": [_public_card(r) for r in rows]}
+
+
+# ---------------------------------------------------------------------------
 # Comments (P5) — threaded (one reply level), per-viewer likes + owner heart.
 # ---------------------------------------------------------------------------
 async def _video_access(video_id):

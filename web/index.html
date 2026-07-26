@@ -143,6 +143,13 @@
   details.box>summary{padding:14px 0;font-weight:700;cursor:pointer;list-style:none;color:var(--ink)}
   details.box[open]{padding-bottom:14px}
 
+  .uphead{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .apnext{display:inline-flex;align-items:center;gap:9px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none}
+  .apnext input{position:absolute;opacity:0;width:0;height:0}
+  .apnext .track{width:38px;height:22px;border-radius:12px;background:var(--elev);border:1px solid var(--line);position:relative;transition:.18s}
+  .apnext .track::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--muted);transition:.18s}
+  .apnext input:checked+.track{background:var(--grad);border-color:transparent}
+  .apnext input:checked+.track::after{transform:translateX(16px);background:#fff}
   .up .uprow{display:flex;gap:10px;margin-bottom:12px;cursor:pointer;border-radius:10px;padding:4px}
   .up .uprow:hover{background:var(--bg2)}
   .up .upt{width:168px;aspect-ratio:16/9;border-radius:9px;overflow:hidden;background:#000;flex:none;position:relative;display:grid;place-items:center}
@@ -625,16 +632,29 @@ async function loadTranscript(id){
       <div class="tr">${t.segments.map(s=>`<div class="seg" onclick="seekTo(${Number(s.start)||0})"><span class="t">${fmtDur(s.start)}</span><span class="x">${esc(s.text)}</span></div>`).join('')}</div></details>`;
   }catch(e){}
 }
-function renderUpNext(cur){
-  const box=$('#upnext'); if(!TOKEN || !LIB.length){ box.innerHTML=''; return; }
-  const list=LIB.filter(v=>v.status==='ready' && v.id!==cur.id).slice(0,12);
-  if(!list.length){ box.innerHTML=''; return; }
-  box.innerHTML = `<div class="sectitle">More from your library</div>`+list.map(v=>`
-    <div class="uprow" onclick="go('watch=${v.id}')">
+// Related / up-next (P7) + autoplay-next.
+let _related=[];
+let _autoplay = localStorage.getItem('mikevideo_autoplay')!=='0';   // default ON
+function setAutoplay(on){ _autoplay=!!on; localStorage.setItem('mikevideo_autoplay', _autoplay?'1':'0'); }
+function upRow(v){
+  const ch=v.channel;
+  return `<div class="uprow" onclick="go('watch=${v.id}')">
       <div class="upt">${v.thumb_url?`<img src="${v.thumb_url}" loading="lazy">`:'<span class="ph">▶</span>'}${v.duration_sec?`<span class="dur">${fmtDur(v.duration_sec)}</span>`:''}</div>
       <div class="upmeta"><div class="upname">${esc(titleOf(v))}</div>
-        <div class="upsub">${v.visibility==='public'?'🌐 ':''}${ago(v.created_at)}</div></div>
-    </div>`).join('');
+        <div class="upsub">${ch?esc(ch.display_name)+' · ':''}${fmtViews(v.view_count)}${ago(v.created_at)}</div></div>
+    </div>`;
+}
+async function renderUpNext(cur){
+  const box=$('#upnext'); if(!box) return;
+  let rel=[];
+  try{ const r=await fetch('/api/videos/'+cur.id+'/related',{headers:hdr()}); if(r.ok) rel=((await r.json()).videos)||[]; }catch(e){}
+  _related=rel;
+  // Autoplay-next: when THIS video ENDS, navigate to the top related one. This only
+  // hooks the 'ended' event — it never touches the decode/HLS setup in mountPlayer.
+  if(window._video){ window._video.onended=()=>{ if(_autoplay && _related.length) go('watch='+_related[0].id); }; }
+  box.innerHTML = `<div class="uphead"><span class="sectitle" style="margin:0">Up next</span>
+      <label class="apnext">Autoplay<input type="checkbox" ${_autoplay?'checked':''} onchange="setAutoplay(this.checked)"><span class="track"></span></label></div>`
+    + (rel.length ? rel.map(upRow).join('') : `<div class="hint" style="padding:10px 0">No related videos yet.</div>`);
 }
 async function toggleVis(id, cur){
   const next = cur==='public' ? 'private' : 'public';
