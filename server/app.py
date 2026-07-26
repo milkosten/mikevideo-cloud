@@ -788,6 +788,192 @@ async def subscriptions_feed(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Comments (P5) — threaded (one reply level), per-viewer likes + owner heart.
+# ---------------------------------------------------------------------------
+async def _video_access(video_id):
+    """(owner_user_id, visibility) for a video, or (None, None) if missing."""
+    r = await db.pool().fetchrow(
+        "SELECT user_id, visibility FROM mikevideo.videos WHERE id=$1", video_id)
+    return (r["user_id"], r["visibility"]) if r else (None, None)
+
+
+def _comment_node(r, viewer, owner) -> dict:
+    return {
+        "id": str(r["id"]),
+        "parent_id": str(r["parent_id"]) if r["parent_id"] else None,
+        "body": r["body"],
+        "hearted": bool(r["hearted"]),
+        "like_count": int(r["like_count"] or 0),
+        "liked": bool(r["liked"]),
+        "author": _channel_brief(r["handle"], r["channel_name"], r["avatar_url"], r["user_id"]),
+        "created_at": _iso(r["created_at"]),
+        "can_delete": bool(viewer and (viewer == r["user_id"] or viewer == owner)),
+        "is_author": viewer == r["user_id"],
+        "replies": [],
+    }
+
+
+_COMMENT_SELECT = (
+    "SELECT c.id, c.user_id, c.parent_id, c.body, c.hearted, c.created_at,"
+    " ch.handle, ch.display_name AS channel_name, ch.avatar_url,"
+    " (SELECT count(*) FROM mikevideo.comment_likes cl WHERE cl.comment_id=c.id) AS like_count,"
+    " ($2::text IS NOT NULL AND EXISTS(SELECT 1 FROM mikevideo.comment_likes cl"
+    "   WHERE cl.comment_id=c.id AND cl.user_id=$2)) AS liked"
+    " FROM mikevideo.comments c"
+    " LEFT JOIN mikevideo.channels ch ON ch.user_id=c.user_id"
+)
+
+
+@app.get("/api/videos/{video_id}/comments")
+async def list_comments(video_id: str, request: Request):
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    owner, vis = await _video_access(vid)
+    if owner is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    viewer = await authenticate(request)
+    if vis != "public" and viewer != owner:      # private → owner only
+        return JSONResponse({"error": "not found"}, status_code=404)
+    rows = await db.pool().fetch(
+        _COMMENT_SELECT + " WHERE c.video_id=$1 ORDER BY c.created_at ASC", vid, viewer)
+    nodes = {str(r["id"]): _comment_node(r, viewer, owner) for r in rows}
+    top = []
+    for r in rows:
+        n = nodes[str(r["id"])]
+        pid = n["parent_id"]
+        if pid and pid in nodes:
+            nodes[pid]["replies"].append(n)      # replies stay chronological
+        else:
+            top.append(n)
+    top.sort(key=lambda n: n["created_at"] or "", reverse=True)   # newest thread first
+    return {"video_id": str(vid), "count": len(rows), "comments": top,
+            "can_comment": bool(viewer and (vis == "public" or viewer == owner)),
+            "is_owner": viewer == owner}
+
+
+@app.post("/api/videos/{video_id}/comments")
+async def post_comment(video_id: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    owner, vis = await _video_access(vid)
+    if owner is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if vis != "public" and user_id != owner:
+        return JSONResponse({"error": "cannot comment on this video"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    text = str(body.get("body") or "").strip()[:2000]
+    if not text:
+        return JSONResponse({"error": "body required"}, status_code=400)
+    pid = None
+    if body.get("parent_id"):
+        pid = _vid_or_400(str(body.get("parent_id")))
+        prow = await db.pool().fetchrow(
+            "SELECT parent_id FROM mikevideo.comments WHERE id=$1 AND video_id=$2", pid, vid)
+        if prow is None:
+            return JSONResponse({"error": "parent not found"}, status_code=400)
+        if prow["parent_id"]:                    # collapse to single-depth threads
+            pid = prow["parent_id"]
+    await _ensure_channel(user_id)               # so the author's @handle resolves
+    cid = uuid.uuid4()
+    await db.pool().execute(
+        "INSERT INTO mikevideo.comments(id, video_id, user_id, parent_id, body)"
+        " VALUES($1,$2,$3,$4,$5)", cid, vid, user_id, pid, text)
+    r = await db.pool().fetchrow(_COMMENT_SELECT + " WHERE c.id=$1", cid, user_id)
+    return _comment_node(r, user_id, owner)
+
+
+@app.delete("/api/comments/{comment_id}")
+async def delete_comment(comment_id: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    cid = _vid_or_400(comment_id)
+    if cid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    row = await db.pool().fetchrow(
+        "SELECT c.user_id, v.user_id AS owner FROM mikevideo.comments c"
+        " JOIN mikevideo.videos v ON v.id=c.video_id WHERE c.id=$1", cid)
+    if row is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if user_id != row["user_id"] and user_id != row["owner"]:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    await db.pool().execute("DELETE FROM mikevideo.comments WHERE id=$1", cid)  # cascade
+    return {"ok": True}
+
+
+async def _comment_like_count(cid) -> int:
+    return int(await db.pool().fetchval(
+        "SELECT count(*) FROM mikevideo.comment_likes WHERE comment_id=$1", cid) or 0)
+
+
+@app.post("/api/comments/{comment_id}/like")
+async def like_comment(comment_id: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    cid = _vid_or_400(comment_id)
+    if cid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    exists = await db.pool().fetchval("SELECT 1 FROM mikevideo.comments WHERE id=$1", cid)
+    if not exists:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    await db.pool().execute(
+        "INSERT INTO mikevideo.comment_likes(comment_id, user_id) VALUES($1,$2)"
+        " ON CONFLICT DO NOTHING", cid, user_id)
+    return {"liked": True, "like_count": await _comment_like_count(cid)}
+
+
+@app.delete("/api/comments/{comment_id}/like")
+async def unlike_comment(comment_id: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    cid = _vid_or_400(comment_id)
+    if cid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    await db.pool().execute(
+        "DELETE FROM mikevideo.comment_likes WHERE comment_id=$1 AND user_id=$2", cid, user_id)
+    return {"liked": False, "like_count": await _comment_like_count(cid)}
+
+
+async def _set_heart(comment_id: str, request: Request, on: bool):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    cid = _vid_or_400(comment_id)
+    if cid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    row = await db.pool().fetchrow(
+        "SELECT v.user_id AS owner FROM mikevideo.comments c"
+        " JOIN mikevideo.videos v ON v.id=c.video_id WHERE c.id=$1", cid)
+    if row is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if user_id != row["owner"]:
+        return JSONResponse({"error": "only the video owner can heart"}, status_code=403)
+    await db.pool().execute(
+        "UPDATE mikevideo.comments SET hearted=$2, updated_at=now() WHERE id=$1", cid, on)
+    return {"hearted": on}
+
+
+@app.post("/api/comments/{comment_id}/heart")
+async def heart_comment(comment_id: str, request: Request):
+    return await _set_heart(comment_id, request, True)
+
+
+@app.delete("/api/comments/{comment_id}/heart")
+async def unheart_comment(comment_id: str, request: Request):
+    return await _set_heart(comment_id, request, False)
+
+
+# ---------------------------------------------------------------------------
 # Engagement (P1): views · likes · watch progress
 # ---------------------------------------------------------------------------
 def _vid_or_400(video_id: str):

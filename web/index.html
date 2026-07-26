@@ -197,6 +197,31 @@
   .subbtn.on{background:var(--elev);color:var(--muted);border:1px solid var(--line)}
   .wchanrow{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:6px 0 14px}
   .wchanrow .wchan{margin:0}
+
+  /* ---------- comments (P5) ---------- */
+  .comments{margin-top:26px}
+  .cmhead{font-size:16px;font-weight:700;margin-bottom:16px}
+  .cmprow{display:flex;gap:12px;margin-bottom:22px}
+  .cmpin{flex:1;display:flex;gap:10px;align-items:center}
+  .cmpin input{flex:1;background:transparent;border:none;border-bottom:1px solid var(--line);
+    padding:8px 2px;outline:none;font-size:14px;color:var(--ink)}
+  .cmpin input:focus{border-bottom-color:var(--ink)}
+  .cmt{display:flex;gap:12px;margin-bottom:18px}
+  .cmt .av{width:38px;height:38px;flex:none;cursor:pointer}
+  .cmbody{min-width:0;flex:1}
+  .cmmeta{display:flex;align-items:center;gap:8px}
+  .cmname{font-size:13px;font-weight:600;cursor:pointer}
+  .cmname:hover{color:var(--muted)}
+  .cmago{color:var(--muted);font-size:12px}
+  .cheart{color:var(--rose);font-size:12px}
+  .cmtext{font-size:14px;margin:3px 0 6px;white-space:pre-wrap;word-break:break-word}
+  .cmbar{display:flex;align-items:center;gap:6px}
+  .cmaction{color:var(--muted);font-size:12.5px;font-weight:600;border-radius:16px;padding:5px 9px}
+  .cmaction:hover{background:var(--elev);color:var(--ink)}
+  .cmaction.on{color:var(--ink)}
+  .creplies{margin-top:12px;padding-left:4px;border-left:2px solid var(--line)}
+  .creplies .cmt{margin-left:8px}
+  .creplies .av{width:30px;height:30px}
   @media(max-width:640px){ .chav{width:72px;height:72px} .chav.letter{font-size:30px} h1.chname{font-size:21px} }
   .drop{border:1.5px dashed var(--line);border-radius:16px;padding:40px 20px;text-align:center;color:var(--muted);
     background:var(--bg2);cursor:pointer;transition:.15s}
@@ -493,8 +518,86 @@ function renderWatchInfo(v){
       <div class="spacer"></div>
     </div>
     <div class="desc"><div class="dmeta">${fmtViews(v.view_count)}${esc(ago(v.created_at))}${meta?'  ·  '+esc(meta):''}</div>${ai||'<span class="hint">No description yet.</span>'}${chapters}</div>
-    <div id="trbox"></div>`;
+    <div id="trbox"></div>
+    <div id="comments" class="comments"></div>`;
   if(v.transcript_status==='ready') loadTranscript(v.id);
+  loadComments(v);
+}
+
+/* ---------------- comments (P5) ---------------- */
+async function loadComments(v){
+  const box=$('#comments'); if(!box) return;
+  let data=null;
+  try{ const r=await fetch('/api/videos/'+v.id+'/comments',{headers:hdr()}); if(r.ok) data=await r.json(); }catch(e){}
+  if(!data){ box.innerHTML=''; return; }
+  const composer = data.can_comment
+    ? `<div class="cmprow"><div class="av letter">${esc(((MYCH&&(MYCH.display_name||MYCH.handle))||'M')[0].toUpperCase())}</div>
+        <div class="cmpin"><input id="cmp-input" placeholder="Add a comment…" maxlength="2000"
+          onkeydown="if(event.key==='Enter')postComment('${v.id}',null,'cmp-input')">
+        <button class="btn primary" onclick="postComment('${v.id}',null,'cmp-input')">Comment</button></div></div>`
+    : (TOKEN? '' : `<div class="hint" style="margin:8px 0 16px">Sign in to join the conversation.</div>`);
+  box.innerHTML = `<div class="cmhead">${data.count} Comment${data.count===1?'':'s'}</div>
+    ${composer}
+    <div id="cmlist">${data.comments.map(c=>commentHtml(c, v.id, data.is_owner)).join('')||'<div class="hint">No comments yet — be the first.</div>'}</div>`;
+}
+function commentHtml(c, videoId, isOwner){
+  const a=c.author||{};
+  const heart = c.hearted ? `<span class="cheart" title="Hearted by the creator">❤</span>` : '';
+  const heartBtn = isOwner ? `<button class="cmaction ${c.hearted?'on':''}" onclick="toggleHeart('${c.id}','${videoId}',${!c.hearted})" title="Heart">❤</button>` : '';
+  const delBtn = c.can_delete ? `<button class="cmaction" onclick="deleteComment('${c.id}','${videoId}')" title="Delete">🗑</button>` : '';
+  const replies = (c.replies&&c.replies.length)
+    ? `<div class="creplies">${c.replies.map(rc=>commentHtml(rc, videoId, isOwner)).join('')}</div>` : '';
+  const isReply = !!c.parent_id;
+  return `<div class="cmt" data-cid="${c.id}">
+    <div class="av letter" onclick="${a.handle?`go('channel=${esc(a.handle)}')`:''}">${esc((a.display_name||a.handle||'?')[0].toUpperCase())}</div>
+    <div class="cmbody">
+      <div class="cmmeta"><span class="cmname" onclick="${a.handle?`go('channel=${esc(a.handle)}')`:''}">${esc(a.display_name||('@'+a.handle))}</span>
+        <span class="cmago">${ago(c.created_at)}</span>${heart}</div>
+      <div class="cmtext">${esc(c.body)}</div>
+      <div class="cmbar">
+        <button class="cmaction ${c.liked?'on':''}" id="clike-${c.id}" onclick="toggleCommentLike('${c.id}')">👍 <span id="clc-${c.id}">${c.like_count||''}</span></button>
+        ${isReply?'':`<button class="cmaction" onclick="showReply('${c.id}','${videoId}')">Reply</button>`}
+        ${heartBtn}${delBtn}
+      </div>
+      <div id="reply-${c.id}"></div>
+      ${replies}
+    </div></div>`;
+}
+async function postComment(videoId, parentId, inputId){
+  if(!TOKEN){ startOAuth(); return; }
+  const inp=document.getElementById(inputId); if(!inp) return;
+  const body=inp.value.trim(); if(!body) return;
+  try{
+    const payload={body}; if(parentId) payload.parent_id=parentId;
+    const r=await afetch('/api/videos/'+videoId+'/comments',{method:'POST',headers:hdr({'Content-Type':'application/json'}),body:JSON.stringify(payload)});
+    if(!r.ok){ toast('Could not post'); return; }
+    inp.value=''; const cur=await fetchVideo(videoId); if(cur) loadComments(cur); toast('Posted');
+  }catch(e){ toast('Network error'); }
+}
+function showReply(cid, videoId){
+  const box=document.getElementById('reply-'+cid); if(!box) return;
+  if(box.dataset.open){ box.innerHTML=''; box.dataset.open=''; return; }
+  box.dataset.open='1';
+  box.innerHTML=`<div class="cmpin" style="margin-top:8px"><input id="rin-${cid}" placeholder="Add a reply…" maxlength="2000"
+      onkeydown="if(event.key==='Enter')postComment('${videoId}','${cid}','rin-${cid}')">
+    <button class="btn primary" onclick="postComment('${videoId}','${cid}','rin-${cid}')">Reply</button></div>`;
+  const el=document.getElementById('rin-'+cid); if(el) el.focus();
+}
+async function toggleCommentLike(cid){
+  if(!TOKEN){ startOAuth(); return; }
+  const btn=document.getElementById('clike-'+cid); if(!btn) return;
+  const on=btn.classList.contains('on');
+  try{ const r=await afetch('/api/comments/'+cid+'/like',{method:on?'DELETE':'POST'});
+    const d=await r.json(); if(r.ok){ btn.classList.toggle('on', d.liked); const c=document.getElementById('clc-'+cid); if(c) c.textContent=d.like_count||''; } }catch(e){}
+}
+async function toggleHeart(cid, videoId, on){
+  try{ const r=await afetch('/api/comments/'+cid+'/heart',{method:on?'POST':'DELETE'});
+    if(r.ok){ const cur=await fetchVideo(videoId); if(cur) loadComments(cur); } }catch(e){}
+}
+async function deleteComment(cid, videoId){
+  if(!confirm('Delete this comment?')) return;
+  try{ const r=await afetch('/api/comments/'+cid,{method:'DELETE'});
+    if(r.ok){ const cur=await fetchVideo(videoId); if(cur) loadComments(cur); toast('Deleted'); } }catch(e){}
 }
 async function loadTranscript(id){
   try{
