@@ -157,6 +157,31 @@
   .sheet input[type=password],.sheet input[type=text],.sheet input[type=email]{width:100%;background:var(--bg2);
     border:1px solid var(--line);border-radius:11px;padding:11px 14px;outline:none;font-size:14px}
   .sheet input:focus{border-color:var(--peri)}
+  .sheet label{display:block;font-size:12.5px;color:var(--muted);font-weight:600;margin:12px 0 6px}
+  .sheet label input,.sheet label textarea{width:100%;background:var(--bg2);border:1px solid var(--line);
+    border-radius:11px;padding:11px 14px;outline:none;font-size:14px;color:var(--ink);font-family:inherit;resize:vertical}
+  .sheet label input:focus,.sheet label textarea:focus{border-color:var(--peri)}
+  .sheet .row{justify-content:flex-end;margin-top:18px}
+  .sheet .err{color:var(--err);font-size:13px;margin-top:10px;min-height:1em}
+
+  /* ---------- channel avatars + byline ---------- */
+  .av.letter{display:grid;place-items:center;color:#fff;font-weight:800;font-size:15px}
+  .cchan{color:var(--muted);font-size:12.5px;margin-top:3px;font-weight:600;cursor:pointer}
+  .cchan:hover{color:var(--ink)}
+  .wchan{display:flex;align-items:center;gap:11px;margin:6px 0 14px;cursor:pointer;width:max-content}
+  .wchan .av{width:42px;height:42px;border-radius:50%;background:var(--grad);flex:none}
+  .wchan .av.letter{font-size:18px}
+  .wcname{font-weight:700;font-size:15px}
+  .wchandle{color:var(--muted);font-size:12.5px;margin-top:1px}
+  .chbanner{display:flex;align-items:center;gap:20px;margin:6px 0 28px;flex-wrap:wrap}
+  .chav{width:96px;height:96px;border-radius:50%;background:var(--grad);flex:none}
+  .chav.letter{font-size:40px}
+  .chinfo{min-width:0;flex:1}
+  h1.chname{font-size:26px;font-weight:800;margin:0 0 6px}
+  .chsub{color:var(--muted);font-size:14px;font-weight:600}
+  .chbio{color:var(--ink);font-size:14px;margin-top:10px;max-width:70ch;white-space:pre-wrap;line-height:1.5}
+  .chact{display:flex;gap:10px;flex-wrap:wrap}
+  @media(max-width:640px){ .chav{width:72px;height:72px} .chav.letter{font-size:30px} h1.chname{font-size:21px} }
   .drop{border:1.5px dashed var(--line);border-radius:16px;padding:40px 20px;text-align:center;color:var(--muted);
     background:var(--bg2);cursor:pointer;transition:.15s}
   .drop:hover,.drop.hot{border-color:var(--rose);color:var(--ink);background:rgba(255,111,165,.06)}
@@ -238,13 +263,18 @@ function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('on'); 
 function renderAccount(){
   const a=$('#account'); if(!a) return;
   if(TOKEN){
-    const initial=(USER&&USER.email)?USER.email[0].toUpperCase():'M';
-    a.innerHTML=`<button class="keydot on" title="${esc((USER&&USER.email)||'')} — sign out" onclick="signOut()">${initial}</button>`;
+    const initial=(MYCH&&(MYCH.display_name||MYCH.handle))?(MYCH.display_name||MYCH.handle)[0].toUpperCase()
+      :((USER&&USER.email)?USER.email[0].toUpperCase():'M');
+    a.innerHTML=`<button class="keydot on" title="Your channel" onclick="openMyChannel()">${initial}</button>`;
   } else {
     a.innerHTML=`<button class="btn ghost" onclick="startOAuth()">Sign in</button>`;
   }
 }
-function signOut(){ TOKEN=''; REFRESH=''; USER=null;
+async function openMyChannel(){
+  if(!MYCH) await loadMyChannel();
+  if(MYCH&&MYCH.handle) go('channel='+MYCH.handle); else startOAuth();
+}
+function signOut(){ TOKEN=''; REFRESH=''; USER=null; MYCH=null;
   ['mikevideo_token','mikevideo_refresh','mikevideo_user'].forEach(k=>localStorage.removeItem(k));
   renderAccount(); go(''); route(); toast('Signed out'); }
 
@@ -255,6 +285,7 @@ function parseHash(){
   if(h.startsWith('watch=')) return {v:'watch', id:decodeURIComponent(h.slice(6))};
   if(h.startsWith('search=')) return {v:'search', q:decodeURIComponent(h.slice(7))};
   if(h.startsWith('playlist=')) return {v:'playlist', id:decodeURIComponent(h.slice(9))};
+  if(h.startsWith('channel=')) return {v:'channel', handle:decodeURIComponent(h.slice(8))};
   if(h==='playlists') return {v:'playlists'};
   return {v:'home'};
 }
@@ -264,6 +295,7 @@ async function route(){
   if(r.v==='search'){ $('#q').value=r.q; return renderSearch(r.q); }
   if(r.v==='playlists') return renderPlaylists();
   if(r.v==='playlist') return renderPlaylistDetail(r.id);
+  if(r.v==='channel') return renderChannel(r.handle);
   return renderHome();
 }
 window.addEventListener('hashchange', route);
@@ -305,12 +337,22 @@ function videoCard(v){
   const img = v.thumb_url? `<img class="" src="${v.thumb_url}" loading="lazy">` : '<span class="ph">▶</span>';
   const cc = ccLang(v)? `<span class="cc"> · CC ${ccLang(v)}</span>`:'';
   const pbar = (v.progress_sec&&v.duration_sec)? `<div class="pbar"><i style="width:${Math.min(100,v.progress_sec/v.duration_sec*100)}%"></i></div>`:'';
+  const ch = v.channel;
+  const av = ch ? avatarEl(ch, 'av') : `<div class="av"></div>`;
+  const chLine = ch ? `<div class="cchan" onclick="event.stopPropagation();go('channel=${esc(ch.handle)}')">${esc(ch.display_name)}</div>` : '';
   return `<div class="card" onclick="${ready?`go('watch=${v.id}')`:''}">
     <div class="thumb ${contain}">${img}${vis||state}${dur}${pbar}</div>
-    <div class="cmeta"><div class="av"></div><div>
+    <div class="cmeta">${av}<div>
       <div class="ctitle">${esc(titleOf(v))}</div>
+      ${chLine}
       <div class="csub">${fmtViews(v.view_count)}${ago(v.created_at)}${cc}</div>
     </div></div></div>`;
+}
+// A channel avatar: image if set, else the first letter on the brand gradient.
+function avatarEl(ch, cls){
+  const name=(ch.display_name||ch.handle||'?');
+  if(ch.avatar_url) return `<div class="${cls}" style="background-image:url('${esc(ch.avatar_url)}');background-size:cover"></div>`;
+  return `<div class="${cls} letter">${esc(name[0].toUpperCase())}</div>`;
 }
 async function renderHome(){
   if(!TOKEN){
@@ -402,7 +444,12 @@ function renderWatchInfo(v){
     v.ai_chapters.map(c=>`<div class="chap" onclick="seekTo(${Number(c.start)||0})"><span class="t">${fmtDur(c.start)}</span><span>${esc(c.title||'')}</span></div>`).join('')+`</div>`;
   const info=$('#winfo');
   const likeBtn = `<button class="pill ${v.liked?'on':''}" id="likebtn" onclick="toggleLike('${v.id}')">👍 <span id="likecount">${fmtCount(v.likes||0)}</span></button>`;
+  const ch=v.channel;
+  const chRow = ch ? `<div class="wchan" onclick="go('channel=${esc(ch.handle)}')">
+      ${avatarEl(ch,'av')}<div><div class="wcname">${esc(ch.display_name)}</div>
+      <div class="wchandle">@${esc(ch.handle)}</div></div></div>` : '';
   info.innerHTML = `<h1 class="wt">${esc(titleOf(v))}</h1>
+    ${chRow}
     <div class="wactions">
       ${likeBtn}
       <button class="pill" onclick="openSave('${v.id}')">➕ Save</button>
@@ -453,6 +500,60 @@ async function share(id, isPublic){
   const url=watchLink(id);
   if(navigator.share){ try{ await navigator.share({title:'MikeVideo', url}); return; }catch(e){} }
   copyLink(id);
+}
+
+/* ---------------- channel (P3) ---------------- */
+let MYCH = null;   // {handle,...} of the signed-in user's own channel
+async function loadMyChannel(){
+  if(!TOKEN){ MYCH=null; return null; }
+  try{ const r=await afetch('/api/channels/me'); if(r.ok){ MYCH=await r.json(); return MYCH; } }catch(e){}
+  return null;
+}
+async function renderChannel(handle){
+  view.innerHTML=`<div id="chhead"></div><div class="sectitle" id="chsec">Videos</div><div id="grid" class="grid"></div>`;
+  let data=null;
+  try{ const r=await fetch('/api/channels/'+encodeURIComponent(handle),{headers:hdr()});
+    if(r.ok) data=await r.json(); }catch(e){}
+  if(!data){ view.innerHTML=`<div class="empty" style="margin-top:8vh"><b>Channel not found.</b>
+    <p style="color:var(--muted);margin-top:8px">This creator handle doesn't exist.</p>
+    <button class="btn ghost" onclick="go('')" style="display:inline-flex;margin-top:6px">Go home</button></div>`; return; }
+  const c=data.channel, s=data.stats||{};
+  const stat=`${s.video_count||0} video${s.video_count===1?'':'s'} · ${fmtCount(s.total_views||0)} view${s.total_views===1?'':'s'}`;
+  $('#chhead').innerHTML=`<div class="chbanner">
+    ${avatarEl(c,'chav')}
+    <div class="chinfo"><h1 class="chname">${esc(c.display_name)}</h1>
+      <div class="chsub">@${esc(c.handle)} · ${stat}</div>
+      ${c.bio?`<div class="chbio">${esc(c.bio)}</div>`:''}</div>
+    ${data.is_me?`<div class="chact"><button class="btn ghost" onclick="editChannel()">Edit channel</button>
+      <button class="btn ghost" onclick="signOut()">Sign out</button></div>`:''}
+  </div>`;
+  const g=$('#grid');
+  g.innerHTML = data.videos.length ? data.videos.map(videoCard).join('')
+    : `<div class="empty" style="grid-column:1/-1">${data.is_me?'No public videos yet — make one public to feature it here.':'No public videos yet.'}</div>`;
+}
+function editChannel(){
+  const c=(MYCH&&MYCH.channel)?MYCH.channel:MYCH; if(!MYCH) return;
+  const d=document.createElement('div'); d.className='modal';
+  d.innerHTML=`<div class="sheet"><h3>Edit channel</h3>
+    <label>Display name<input id="ec_name" maxlength="80" value="${esc(MYCH.display_name||'')}"></label>
+    <label>Handle<input id="ec_handle" maxlength="30" value="${esc(MYCH.handle||'')}"></label>
+    <label>Avatar URL<input id="ec_avatar" maxlength="500" value="${esc(MYCH.avatar_url||'')}"></label>
+    <label>Bio<textarea id="ec_bio" maxlength="500" rows="3">${esc(MYCH.bio||'')}</textarea></label>
+    <div class="err" id="ec_err"></div>
+    <div class="row"><button class="btn ghost" id="ec_cancel">Cancel</button>
+      <button class="btn primary" id="ec_save">Save</button></div></div>`;
+  document.body.appendChild(d);
+  d.querySelector('#ec_cancel').onclick=()=>d.remove();
+  d.onclick=e=>{ if(e.target===d) d.remove(); };
+  d.querySelector('#ec_save').onclick=async()=>{
+    const body={ display_name:$('#ec_name').value.trim(), handle:$('#ec_handle').value.trim().replace(/^@/,''),
+      avatar_url:$('#ec_avatar').value.trim(), bio:$('#ec_bio').value.trim() };
+    try{ const r=await afetch('/api/channels/me',{method:'PUT',headers:hdr({'Content-Type':'application/json'}),body:JSON.stringify(body)});
+      const j=await r.json();
+      if(!r.ok){ $('#ec_err').textContent=j.error||'Could not save'; return; }
+      MYCH=j; d.remove(); toast('Channel updated'); renderAccount(); go('channel='+j.handle); }
+    catch(e){ $('#ec_err').textContent='Network error'; }
+  };
 }
 
 /* ---------------- playlists (P2) ---------------- */
@@ -571,7 +672,7 @@ async function handleCallback(){
       body:JSON.stringify({grant_type:'authorization_code',code,code_verifier:v,client_id:OAUTH.client,redirect_uri:OAUTH.redirect})});
     const d=await r.json();
     if(!r.ok || !d.access_token){ renderAccount(); route(); toast('Sign-in failed'); return; }
-    setTokens(d); toast('Signed in');
+    setTokens(d); toast('Signed in'); await loadMyChannel();
   }catch(e){ toast('Sign-in failed'); }
   renderAccount(); go(''); route();
 }
@@ -644,7 +745,7 @@ async function uploadFile(file, box){
 
 /* ---------------- boot ---------------- */
 if(location.pathname==='/auth/callback'){ handleCallback(); }
-else { renderAccount(); route(); }
+else { renderAccount(); route(); if(TOKEN) loadMyChannel().then(renderAccount); }
 // live-refresh the home grid so encoding→ready + new transcripts/titles surface
 setInterval(()=>{ if(parseHash().v==='home' && TOKEN) loadLibrary().then(v=>drawGrid(_filter,v)); }, 9000);
 </script>

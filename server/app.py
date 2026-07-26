@@ -8,6 +8,7 @@ Guard rails: ISO-8601 timestamps, parameterized SQL, never-trust-200,
 never load a whole file into RAM (ffmpeg streams; media served with byte-range).
 """
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -105,6 +106,64 @@ def _thumb_url(user_id: str, video_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Channels (P3) — one public creator profile per user, keyed on user_id.
+# ---------------------------------------------------------------------------
+_HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{3,30}$")
+
+
+def _default_handle(user_id: str) -> str:
+    """Deterministic, unique-per-user default @handle (stable, editable later)."""
+    return "u" + hashlib.sha1(user_id.encode()).hexdigest()[:10]
+
+
+def _channel_brief(handle, display_name, avatar_url, user_id: str) -> dict:
+    """A compact channel descriptor for cards, tolerant of a missing row."""
+    h = handle or _default_handle(user_id)
+    return {
+        "handle": h,
+        "display_name": display_name or ("@" + h),
+        "avatar_url": avatar_url,
+    }
+
+
+async def _ensure_channel(user_id: str):
+    """Guarantee a channel row exists for a user; return it. Idempotent."""
+    row = await db.pool().fetchrow(
+        "SELECT user_id, handle, display_name, bio, avatar_url"
+        " FROM mikevideo.channels WHERE user_id=$1", user_id)
+    if row:
+        return row
+    await db.pool().execute(
+        "INSERT INTO mikevideo.channels(user_id, handle) VALUES($1,$2)"
+        " ON CONFLICT (user_id) DO NOTHING", user_id, _default_handle(user_id))
+    return await db.pool().fetchrow(
+        "SELECT user_id, handle, display_name, bio, avatar_url"
+        " FROM mikevideo.channels WHERE user_id=$1", user_id)
+
+
+async def _channel_for(user_id: str) -> dict:
+    """Channel brief for a user_id (for the watch page). Tolerant of no row."""
+    row = await db.pool().fetchrow(
+        "SELECT handle, display_name, avatar_url FROM mikevideo.channels WHERE user_id=$1",
+        user_id)
+    if row:
+        return _channel_brief(row["handle"], row["display_name"],
+                              row["avatar_url"], user_id)
+    return _channel_brief(None, None, None, user_id)
+
+
+async def backfill_channels():
+    """On startup, ensure every user who owns a video has a channel row so their
+    default @handle resolves. Idempotent; small (one row per user)."""
+    try:
+        users = await db.pool().fetch("SELECT DISTINCT user_id FROM mikevideo.videos")
+        for u in users:
+            await _ensure_channel(u["user_id"])
+    except Exception as e:
+        logger.warning("backfill_channels skipped: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
@@ -123,6 +182,8 @@ async def _startup():
     # AI enrichment (Phase C) — own worker + a retry sweep for the flaky GPU.
     asyncio.create_task(enrich.worker_loop())
     asyncio.create_task(enrich.retry_loop())
+    # P3: ensure existing creators have a resolvable @handle (idempotent).
+    asyncio.create_task(backfill_channels())
     logger.info("mikevideo-cloud started")
 
 
@@ -174,11 +235,14 @@ async def oauth_token(request: Request):
 @app.get("/api/public/videos")
 async def public_feed():
     rows = await db.pool().fetch(
-        "SELECT id, user_id, filename, ai_title, duration_sec, display_width,"
-        " display_height, orientation, spoken_language, transcript_status,"
-        " view_count, created_at, published_at FROM mikevideo.videos"
-        " WHERE visibility='public' AND status='ready'"
-        " ORDER BY published_at DESC NULLS LAST, created_at DESC LIMIT 200")
+        "SELECT v.id, v.user_id, v.filename, v.ai_title, v.duration_sec,"
+        " v.display_width, v.display_height, v.orientation, v.spoken_language,"
+        " v.transcript_status, v.view_count, v.created_at, v.published_at,"
+        " c.handle, c.display_name AS channel_name, c.avatar_url"
+        " FROM mikevideo.videos v"
+        " LEFT JOIN mikevideo.channels c ON c.user_id=v.user_id"
+        " WHERE v.visibility='public' AND v.status='ready'"
+        " ORDER BY v.published_at DESC NULLS LAST, v.created_at DESC LIMIT 200")
     out = []
     for r in rows:
         vid = str(r["id"])
@@ -196,6 +260,8 @@ async def public_feed():
             "visibility": "public",
             "view_count": r["view_count"],
             "thumb_url": _thumb_url(r["user_id"], vid),
+            "channel": _channel_brief(r["handle"], r["channel_name"],
+                                      r["avatar_url"], r["user_id"]),
             "created_at": _iso(r["created_at"]),
             "published_at": _iso(r["published_at"]),
         })
@@ -251,6 +317,8 @@ async def create_video(request: Request):
         " VALUES($1,$2,$3,$4,$5,$6,$7,$8,'uploading',$9)",
         video_id, user_id, device_id, upload_id, filename, content_type,
         total_size, file_hash, taken_at)
+
+    await _ensure_channel(user_id)   # P3: creator profile exists from first upload
 
     ticket = mint_ticket(upload_id=upload_id, user_id=user_id,
                          max_size=total_size, file_hash=file_hash)
@@ -441,6 +509,7 @@ async def get_video(video_id: str, request: Request):
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     payload = _detail_payload(r, is_owner=True)
+    payload["channel"] = await _channel_for(r["user_id"])
     payload.update(await _engagement(vid, user_id))
     return payload
 
@@ -476,6 +545,7 @@ async def get_public_video(video_id: str, request: Request):
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     payload = _detail_payload(r, is_owner=False)
+    payload["channel"] = await _channel_for(r["user_id"])
     viewer = await authenticate(request)          # optional — personalises like/progress
     payload.update(await _engagement(vid, viewer))
     return payload
@@ -510,6 +580,125 @@ async def set_visibility(video_id: str, request: Request):
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"id": str(row["id"]), "visibility": row["visibility"],
             "published_at": _iso(row["published_at"])}
+
+
+# ---------------------------------------------------------------------------
+# Channels (P3) — public creator profiles at @handle
+# ---------------------------------------------------------------------------
+async def _channel_stats(user_id: str) -> dict:
+    """Public-facing counts for a channel: public ready videos + their views."""
+    row = await db.pool().fetchrow(
+        "SELECT count(*) AS n, COALESCE(SUM(view_count),0) AS views"
+        " FROM mikevideo.videos WHERE user_id=$1 AND visibility='public'"
+        " AND status='ready'", user_id)
+    return {"video_count": int(row["n"] or 0), "total_views": int(row["views"] or 0)}
+
+
+def _channel_full(row) -> dict:
+    """The full editable/public channel object from a channels row."""
+    uid = row["user_id"]
+    return {
+        "user_id": uid,
+        "handle": row["handle"] or _default_handle(uid),
+        "display_name": row["display_name"] or ("@" + (row["handle"] or _default_handle(uid))),
+        "bio": row["bio"],
+        "avatar_url": row["avatar_url"],
+    }
+
+
+@app.get("/api/channels/me")
+async def my_channel(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    ch = await _ensure_channel(user_id)
+    out = _channel_full(ch)
+    out["is_me"] = True
+    out["stats"] = await _channel_stats(user_id)
+    return out
+
+
+@app.put("/api/channels/me")
+async def update_my_channel(request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    await _ensure_channel(user_id)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    sets, params = [], []
+    if "handle" in body:
+        handle = str(body.get("handle") or "").lstrip("@").strip()
+        if not _HANDLE_RE.match(handle):
+            return JSONResponse(
+                {"error": "handle must be 3-30 chars: letters, digits, underscore"},
+                status_code=400)
+        clash = await db.pool().fetchval(
+            "SELECT 1 FROM mikevideo.channels WHERE lower(handle)=lower($1)"
+            " AND user_id<>$2", handle, user_id)
+        if clash:
+            return JSONResponse({"error": "handle taken"}, status_code=409)
+        params.append(handle); sets.append(f"handle=${len(params)}")
+    if "display_name" in body:
+        params.append(str(body.get("display_name") or "").strip()[:80])
+        sets.append(f"display_name=${len(params)}")
+    if "bio" in body:
+        params.append((str(body.get("bio")).strip()[:500]) if body.get("bio") else None)
+        sets.append(f"bio=${len(params)}")
+    if "avatar_url" in body:
+        params.append((str(body.get("avatar_url")).strip()[:500]) if body.get("avatar_url") else None)
+        sets.append(f"avatar_url=${len(params)}")
+    if not sets:
+        return JSONResponse({"error": "nothing to update"}, status_code=400)
+
+    params.append(user_id)
+    row = await db.pool().fetchrow(
+        f"UPDATE mikevideo.channels SET {', '.join(sets)}, updated_at=now()"
+        f" WHERE user_id=${len(params)}"
+        " RETURNING user_id, handle, display_name, bio, avatar_url", *params)
+    if row is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    out = _channel_full(row)
+    out["is_me"] = True
+    out["stats"] = await _channel_stats(user_id)
+    return out
+
+
+@app.get("/api/channels/{handle}")
+async def public_channel(handle: str, request: Request):
+    handle = handle.lstrip("@")
+    ch = await db.pool().fetchrow(
+        "SELECT user_id, handle, display_name, bio, avatar_url"
+        " FROM mikevideo.channels WHERE lower(handle)=lower($1)", handle)
+    if ch is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    owner = ch["user_id"]
+    rows = await db.pool().fetch(
+        "SELECT id, ai_title, filename, duration_sec, display_width, display_height,"
+        " orientation, spoken_language, transcript_status, view_count, created_at,"
+        " published_at FROM mikevideo.videos"
+        " WHERE user_id=$1 AND visibility='public' AND status='ready'"
+        " ORDER BY published_at DESC NULLS LAST, created_at DESC LIMIT 200", owner)
+    videos = []
+    for r in rows:
+        vid = str(r["id"])
+        videos.append({
+            "id": vid, "status": "ready", "ai_title": r["ai_title"],
+            "filename": r["filename"], "duration_sec": r["duration_sec"],
+            "display_width": r["display_width"], "display_height": r["display_height"],
+            "orientation": r["orientation"], "spoken_language": r["spoken_language"],
+            "transcript_status": r["transcript_status"], "view_count": r["view_count"],
+            "visibility": "public", "thumb_url": _thumb_url(owner, vid),
+            "created_at": _iso(r["created_at"]),
+        })
+    out = _channel_full(ch)
+    out.pop("user_id", None)                       # don't leak the raw user_id
+    viewer = await authenticate(request)           # optional — flag "this is me"
+    return {"channel": out, "is_me": viewer == owner,
+            "stats": await _channel_stats(owner), "videos": videos}
 
 
 # ---------------------------------------------------------------------------
