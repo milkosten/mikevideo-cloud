@@ -4,3 +4,5 @@ __pycache__/
 /opt/venv/
 .venv/
 data/
+.test-creds
+.mikevideo-test.env
