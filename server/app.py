@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, Response, StreamingResponse
 
@@ -31,6 +32,10 @@ logger = logging.getLogger("mikevideo-cloud")
 app = FastAPI(title="mikevideo-cloud")
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+# IdP base for the web login proxy ("Sign in with MikeOS" — email/password).
+IDP_URL = os.environ.get(
+    "MIKEOSCOMPUTERS_URL", "https://mikeoscomputers-production.up.railway.app").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +139,75 @@ async def health():
         logger.warning("health db check failed: %s", e)
     return {"status": "ok" if ok_db else "degraded", "service": "mikevideo-cloud",
             "db": ok_db}
+
+
+# ---------------------------------------------------------------------------
+# "Sign in with MikeOS" — thin proxy to the IdP so the browser talks to one
+# origin (no CORS). Returns the IdP's {token, user}; the web sends `token` as
+# a Bearer, which authenticate() validates via the cached session path.
+# ---------------------------------------------------------------------------
+async def _auth_proxy(request: Request, path: str):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    email = str(body.get("email") or "").strip()
+    password = str(body.get("password") or "")
+    if not email or not password:
+        return JSONResponse({"error": "email and password required"}, status_code=400)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(f"{IDP_URL}{path}",
+                                  json={"email": email, "password": password})
+        data = r.json()
+    except Exception as e:
+        logger.warning("auth proxy %s failed: %s", path, e)
+        return JSONResponse({"error": "identity service unavailable"}, status_code=502)
+    return JSONResponse(data, status_code=r.status_code)
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request):
+    return await _auth_proxy(request, "/api/auth/login")
+
+
+@app.post("/api/auth/register")
+async def auth_register(request: Request):
+    return await _auth_proxy(request, "/api/auth/register")
+
+
+# ---------------------------------------------------------------------------
+# GET /api/public/videos — the PUBLIC gallery (no auth). Every ready video the
+# fleet's users have made public. This is the anonymous "home feed".
+# ---------------------------------------------------------------------------
+@app.get("/api/public/videos")
+async def public_feed():
+    rows = await db.pool().fetch(
+        "SELECT id, user_id, filename, ai_title, duration_sec, display_width,"
+        " display_height, orientation, spoken_language, transcript_status,"
+        " created_at, published_at FROM mikevideo.videos"
+        " WHERE visibility='public' AND status='ready'"
+        " ORDER BY published_at DESC NULLS LAST, created_at DESC LIMIT 200")
+    out = []
+    for r in rows:
+        vid = str(r["id"])
+        out.append({
+            "id": vid,
+            "status": "ready",
+            "ai_title": r["ai_title"],
+            "filename": r["filename"],
+            "duration_sec": r["duration_sec"],
+            "display_width": r["display_width"],
+            "display_height": r["display_height"],
+            "orientation": r["orientation"],
+            "spoken_language": r["spoken_language"],
+            "transcript_status": r["transcript_status"],
+            "visibility": "public",
+            "thumb_url": _thumb_url(r["user_id"], vid),
+            "created_at": _iso(r["created_at"]),
+            "published_at": _iso(r["published_at"]),
+        })
+    return {"videos": out}
 
 
 # ---------------------------------------------------------------------------
