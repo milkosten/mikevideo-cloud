@@ -1,5 +1,17 @@
 # Blockers — what MikeVideo needs from `account.osmike.com` + the daemon to be fully OAuth-native
 
+> **UPDATE (resolved — Blocker A is DONE).** The provider shipped the web flow:
+> `/.well-known/openid-configuration` now advertises `authorization_endpoint`, `authorization_code` +
+> `code_challenge_methods:[S256]`, and the `mikevideo-web` client (redirect
+> `https://video.osmike.com/auth/callback`) is live. **MikeVideo now implements real Authorization Code
+> + PKCE** on the website (verified: "Sign in" → the MikeOS consent screen for `openid email video.read
+> video.write` → `/auth/callback` → RS256 token), and the **email/password bridge was removed** — the
+> cloud is OAuth Bearer (JWKS) + legacy X-API-KEY only. **Only Blocker B (the daemon token endpoint for
+> the phone app) remains.** Original report kept below for the record.
+
+---
+
+
 **Audience:** whoever owns **`account.osmike.com`** (the IdP / OAuth AS) and the **on-device daemon**.
 **TL;DR:** `video.osmike.com` (cloud + web) is **done and live** for "log in with email, no API keys,
 share public videos." To finish the *real* OAuth vision (standard tokens everywhere, no email/password

@@ -100,11 +100,12 @@ The single `_auth(request, scope=None)` chokepoint (→ `identity.authenticate`)
    JWKS (`/oauth/jwks.json`), checking `iss`/`aud=mikevideo`/`exp`/`scope` (`video.read`/`video.write`).
    `sub` == the same `user_id` as always. No per-request IdP call. This is the target standard
    (`docs/implement_oauth.md`).
-2. **MikeOS web session JWT** — email/password "Sign in with MikeOS" on the website; validated via the
-   IdP `GET /api/auth/me` (**cached**, not per-request). This is the browser **bridge** because the
-   provider is **device-grant only today** (no `/oauth/authorize`/code grant → no PKCE yet; swap to
-   PKCE when it ships, no cloud change).
-3. **Legacy `X-API-KEY`** — `resolve_agent_key` (the phone app still uses this; dual-auth keeps it working).
+2. **Legacy `X-API-KEY`** — `resolve_agent_key` (the phone app still uses this; dual-auth keeps it working).
+Both clients now send **real OAuth tokens**: the **website** does Authorization Code + **PKCE** (S256)
+against `account.osmike.com` (client `mikevideo-web`, redirect `/auth/callback`; the browser redirects to
+`/oauth/authorize`, the SPA exchanges the code via the cloud's `POST /api/oauth/token` proxy → RS256
+access+refresh, sent as Bearer, auto-refreshed on 401). **No email/password bridge, no `/api/auth/me`
+round-trip** (removed). The **app** will do the daemon device-grant once `/api/auth/token` ships (STEP 2).
 - A present-but-**invalid** Bearer must **401** — never fall through to the key path.
 - **Media** (`/media/...`, incl. HLS + thumbs) stays keyless on the **unguessable `video_id`** — the
   app's ExoPlayer/Coil and browser `hls.js` load it directly. Keep it that way, or clients break.
