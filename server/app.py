@@ -788,6 +788,60 @@ async def subscriptions_feed(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/feed/home — the personalized recommendation feed (P6). Blends
+# subscriptions + popularity (views/likes) + tag-affinity from what you've
+# liked/watched, over PUBLIC ready videos. Falls back to plain-recent public.
+# ---------------------------------------------------------------------------
+@app.get("/api/feed/home")
+async def home_feed(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    rows = await db.pool().fetch(
+        "WITH engaged AS ("
+        "   SELECT video_id FROM mikevideo.likes WHERE user_id=$1"
+        "   UNION SELECT video_id FROM mikevideo.watch_progress WHERE user_id=$1),"
+        " affinity AS ("
+        "   SELECT DISTINCT lower(t) AS tag"
+        "   FROM mikevideo.videos ev, unnest(COALESCE(ev.ai_tags, ARRAY[]::text[])) t"
+        "   WHERE ev.id IN (SELECT video_id FROM engaged)),"
+        " subs AS ("
+        "   SELECT channel_user_id FROM mikevideo.subscriptions WHERE subscriber_user_id=$1)"
+        " SELECT v.id, v.user_id, v.filename, v.ai_title, v.duration_sec,"
+        "        v.display_width, v.display_height, v.orientation, v.spoken_language,"
+        "        v.transcript_status, v.view_count, v.created_at, v.published_at,"
+        "        c.handle, c.display_name AS channel_name, c.avatar_url,"
+        "        (v.user_id IN (SELECT channel_user_id FROM subs)) AS is_sub,"
+        "        (SELECT count(*) FROM mikevideo.likes l WHERE l.video_id=v.id) AS likes,"
+        "        (SELECT count(*) FROM unnest(COALESCE(v.ai_tags, ARRAY[]::text[])) t"
+        "           WHERE lower(t) IN (SELECT tag FROM affinity)) AS tag_hits,"
+        "        ((CASE WHEN v.user_id IN (SELECT channel_user_id FROM subs) THEN 50 ELSE 0 END)"
+        "         + (SELECT count(*) FROM unnest(COALESCE(v.ai_tags, ARRAY[]::text[])) t"
+        "              WHERE lower(t) IN (SELECT tag FROM affinity)) * 20"
+        "         + LEAST(COALESCE(v.view_count,0), 100) * 0.3"
+        "         + (SELECT count(*) FROM mikevideo.likes l WHERE l.video_id=v.id) * 5"
+        "        ) AS score"
+        " FROM mikevideo.videos v"
+        " LEFT JOIN mikevideo.channels c ON c.user_id=v.user_id"
+        " WHERE v.visibility='public' AND v.status='ready'"
+        " ORDER BY score DESC, v.published_at DESC NULLS LAST, v.created_at DESC LIMIT 60",
+        user_id)
+    out = []
+    for r in rows:
+        card = _public_card(r)
+        if r["is_sub"]:
+            card["reason"] = "From your subscriptions"
+        elif (r["tag_hits"] or 0) > 0:
+            card["reason"] = "Based on what you watch"
+        elif (r["likes"] or 0) > 0 or (r["view_count"] or 0) > 0:
+            card["reason"] = "Popular on MikeVideo"
+        else:
+            card["reason"] = "New on MikeVideo"
+        out.append(card)
+    return {"videos": out}
+
+
+# ---------------------------------------------------------------------------
 # Comments (P5) — threaded (one reply level), per-viewer likes + owner heart.
 # ---------------------------------------------------------------------------
 async def _video_access(video_id):

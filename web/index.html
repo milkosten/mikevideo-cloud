@@ -100,6 +100,8 @@
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
   .csub{color:var(--muted);font-size:12.5px;margin-top:3px}
   .csub .cc{color:var(--faint)}
+  .creason{color:var(--peri);font-size:11.5px;font-weight:600;margin-top:4px;display:inline-flex;align-items:center;gap:4px}
+  .creason::before{content:"✦"}
 
   .sectitle{font-size:15px;font-weight:700;color:var(--muted);margin:0 0 16px;letter-spacing:.01em}
   .empty{color:var(--muted);text-align:center;padding:70px 20px;border:1px dashed var(--line);border-radius:16px;background:var(--bg2)}
@@ -396,12 +398,14 @@ function videoCard(v){
   const ch = v.channel;
   const av = ch ? avatarEl(ch, 'av') : `<div class="av"></div>`;
   const chLine = ch ? `<div class="cchan" onclick="event.stopPropagation();go('channel=${esc(ch.handle)}')">${esc(ch.display_name)}</div>` : '';
+  const reason = v.reason ? `<div class="creason">${esc(v.reason)}</div>` : '';
   return `<div class="card" onclick="${ready?`go('watch=${v.id}')`:''}">
     <div class="thumb ${contain}">${img}${vis||state}${dur}${pbar}</div>
     <div class="cmeta">${av}<div>
       <div class="ctitle">${esc(titleOf(v))}</div>
       ${chLine}
       <div class="csub">${fmtViews(v.view_count)}${ago(v.created_at)}${cc}</div>
+      ${reason}
     </div></div></div>`;
 }
 // A channel avatar: image if set, else the first letter on the brand gradient.
@@ -425,26 +429,36 @@ async function renderHome(){
     g.innerHTML = vids.map(videoCard).join('');
     return;
   }
+  // Signed-in home: a personalized "Recommended" feed (P6), with a "Your videos"
+  // tab for the owner's own library, and a Continue-watching row on top.
   view.innerHTML = `<div id="continue"></div>
-    <div class="filters"><button class="chip on" data-f="all" onclick="setFilter('all')">All</button>
-    <button class="chip" data-f="public" onclick="setFilter('public')">Public</button>
-    <button class="chip" data-f="private" onclick="setFilter('private')">Private</button></div>
+    <div class="filters"><button class="chip on" data-h="reco" onclick="setHome('reco')">Recommended</button>
+    <button class="chip" data-h="mine" onclick="setHome('mine')">Your videos</button></div>
     <div id="grid" class="grid"></div>`;
-  const vids = await loadLibrary();
-  drawGrid('all', vids);
+  loadLibrary();                 // warm LIB (used by up-next + the "Your videos" tab)
+  setHome('reco');
   try{ const r=await afetch('/api/me/continue'); const cw=((await r.json()).videos)||[];
     if(cw.length){ $('#continue').innerHTML=`<div class="sectitle">Continue watching</div>
       <div class="grid" style="margin-bottom:28px">${cw.map(videoCard).join('')}</div>`; } }catch(e){}
 }
-let _filter='all';
-function setFilter(f){ _filter=f; document.querySelectorAll('.chip[data-f]').forEach(c=>c.classList.toggle('on',c.dataset.f===f)); drawGrid(f, LIB); }
-function drawGrid(f, vids){
+let _home='reco';
+async function setHome(mode){
+  _home=mode;
+  document.querySelectorAll('.chip[data-h]').forEach(c=>c.classList.toggle('on',c.dataset.h===mode));
   const g=$('#grid'); if(!g) return;
-  let list = vids.slice();
-  if(f==='public') list=list.filter(v=>v.visibility==='public');
-  if(f==='private') list=list.filter(v=>v.visibility!=='public');
-  if(!list.length){ g.innerHTML=`<div class="empty" style="grid-column:1/-1">${vids.length?'Nothing here yet.':'No videos yet. Hit <b>Upload</b> to add one.'}</div>`; return; }
-  g.innerHTML = list.map(videoCard).join('');
+  if(mode==='mine'){                                     // the owner's own library
+    const vids = LIB.length ? LIB : await loadLibrary();
+    g.innerHTML = vids.length ? vids.map(videoCard).join('')
+      : `<div class="empty" style="grid-column:1/-1">No videos yet. Hit <b>Upload</b> to add one.</div>`;
+    return;
+  }
+  g.innerHTML = `<div class="empty" style="grid-column:1/-1;border:none;background:none">Loading recommendations…</div>`;
+  let vids=[];
+  try{ const r=await afetch('/api/feed/home'); if(r.ok) vids=((await r.json()).videos)||[]; }catch(e){}
+  if(!vids.length){ try{ const r=await fetch('/api/public/videos'); vids=((await r.json()).videos)||[]; }catch(e){} }
+  if(g!==$('#grid') || _home!=='reco') return;           // user switched tabs while loading
+  g.innerHTML = vids.length ? vids.map(videoCard).join('')
+    : `<div class="empty" style="grid-column:1/-1">Nothing to recommend yet — subscribe to a creator or make a video public.</div>`;
 }
 
 /* ---------------- watch ---------------- */
@@ -924,7 +938,7 @@ async function uploadFile(file, box){
 if(location.pathname==='/auth/callback'){ handleCallback(); }
 else { renderAccount(); route(); if(TOKEN) loadMyChannel().then(renderAccount); }
 // live-refresh the home grid so encoding→ready + new transcripts/titles surface
-setInterval(()=>{ if(parseHash().v==='home' && TOKEN) loadLibrary().then(v=>drawGrid(_filter,v)); }, 9000);
+setInterval(()=>{ if(parseHash().v==='home' && TOKEN){ loadLibrary().then(v=>{ if(_home==='mine' && parseHash().v==='home'){ const g=$('#grid'); if(g) g.innerHTML = v.length? v.map(videoCard).join('') : g.innerHTML; } }); } }, 9000);
 </script>
 </body>
 </html>
