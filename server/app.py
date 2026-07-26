@@ -247,7 +247,7 @@ async def list_videos(request: Request):
         "SELECT id, filename, status, duration_sec, width, height,"
         " display_width, display_height, orientation, aspect_ratio, rotation,"
         " fps, has_audio, spoken_language, transcript_status, ai_title,"
-        " enrich_status, bytes, taken_at, created_at FROM mikevideo.videos"
+        " enrich_status, visibility, bytes, taken_at, created_at FROM mikevideo.videos"
         " WHERE user_id=$1 ORDER BY created_at DESC LIMIT 500", user_id)
     out = []
     for r in rows:
@@ -270,6 +270,7 @@ async def list_videos(request: Request):
             "transcript_status": r["transcript_status"],
             "ai_title": r["ai_title"],
             "enrich_status": r["enrich_status"],
+            "visibility": r["visibility"],
             "bytes": r["bytes"],
             "thumb_url": _thumb_url(user_id, vid) if r["status"] == "ready" else None,
             "taken_at": _iso(r["taken_at"]),
@@ -278,8 +279,84 @@ async def list_videos(request: Request):
     return {"videos": out}
 
 
+# Column list shared by the authed + public detail queries.
+_DETAIL_COLS = (
+    "id, user_id, filename, content_type, status, error, duration_sec, width,"
+    " height, display_width, display_height, orientation, aspect_ratio,"
+    " rotation, video_codec, audio_codec, pix_fmt, fps, video_bitrate,"
+    " audio_bitrate, overall_bitrate, has_audio, audio_channels,"
+    " audio_sample_rate, color_primaries, color_transfer, color_space,"
+    " is_hdr, spoken_language, language_confidence, transcript_status,"
+    " has_speech, ai_title, ai_summary, ai_tags, ai_chapters, enrich_status,"
+    " visibility, bytes, taken_at, created_at, published_at"
+)
+
+
+def _detail_payload(r, is_owner: bool) -> dict:
+    """Build the /api/videos/{id} response from a row. `owner` gets the private
+    controls (visibility, filename); a public viewer gets a lean, safe subset."""
+    owner_user_id = r["user_id"]
+    video_id = str(r["id"])
+    base = f"/media/{owner_user_id}/{video_id}"
+    ready = r["status"] == "ready"
+    captions_ready = r["transcript_status"] == "ready"
+    payload = {
+        "id": video_id,
+        "status": r["status"],
+        "duration_sec": r["duration_sec"],
+        "width": r["width"],
+        "height": r["height"],
+        "display_width": r["display_width"],
+        "display_height": r["display_height"],
+        "orientation": r["orientation"],
+        "aspect_ratio": r["aspect_ratio"],
+        "rotation": r["rotation"],
+        "video_codec": r["video_codec"],
+        "audio_codec": r["audio_codec"],
+        "fps": r["fps"],
+        "has_audio": r["has_audio"],
+        "is_hdr": r["is_hdr"],
+        "spoken_language": r["spoken_language"],
+        "transcript_status": r["transcript_status"],
+        "has_speech": r["has_speech"],
+        "ai_title": r["ai_title"],
+        "ai_summary": r["ai_summary"],
+        "ai_tags": list(r["ai_tags"]) if r["ai_tags"] else None,
+        "ai_chapters": _jsonb(r["ai_chapters"]),
+        "visibility": r["visibility"],
+        "bytes": r["bytes"],
+        "duration": r["duration_sec"],
+        "hls_url": f"{base}/hls/master.m3u8" if ready else None,
+        "mp4_url": f"{base}/video.mp4" if ready else None,
+        "thumb_url": f"{base}/thumb.jpg" if ready else None,
+        "captions_url": f"{base}/captions/{r['spoken_language'] or 'und'}.vtt" if captions_ready else None,
+        "taken_at": _iso(r["taken_at"]),
+        "created_at": _iso(r["created_at"]),
+        "published_at": _iso(r["published_at"]),
+    }
+    if is_owner:
+        payload.update({
+            "filename": r["filename"],
+            "content_type": r["content_type"],
+            "error": r["error"],
+            "pix_fmt": r["pix_fmt"],
+            "video_bitrate": r["video_bitrate"],
+            "audio_bitrate": r["audio_bitrate"],
+            "overall_bitrate": r["overall_bitrate"],
+            "audio_channels": r["audio_channels"],
+            "audio_sample_rate": r["audio_sample_rate"],
+            "color_primaries": r["color_primaries"],
+            "color_transfer": r["color_transfer"],
+            "color_space": r["color_space"],
+            "language_confidence": r["language_confidence"],
+            "enrich_status": r["enrich_status"],
+            "is_owner": True,
+        })
+    return payload
+
+
 # ---------------------------------------------------------------------------
-# GET /api/videos/{id} — detail + HLS master url + mp4 + thumb
+# GET /api/videos/{id} — owner detail (auth) + HLS master url + mp4 + thumb
 # ---------------------------------------------------------------------------
 @app.get("/api/videos/{video_id}")
 async def get_video(video_id: str, request: Request):
@@ -291,65 +368,60 @@ async def get_video(video_id: str, request: Request):
     except ValueError:
         return JSONResponse({"error": "bad id"}, status_code=400)
     r = await db.pool().fetchrow(
-        "SELECT id, filename, content_type, status, error, duration_sec, width,"
-        " height, display_width, display_height, orientation, aspect_ratio,"
-        " rotation, video_codec, audio_codec, pix_fmt, fps, video_bitrate,"
-        " audio_bitrate, overall_bitrate, has_audio, audio_channels,"
-        " audio_sample_rate, color_primaries, color_transfer, color_space,"
-        " is_hdr, spoken_language, language_confidence, transcript_status,"
-        " has_speech, ai_title, ai_summary, ai_tags, ai_chapters, enrich_status,"
-        " bytes, taken_at, created_at FROM mikevideo.videos"
-        " WHERE id=$1 AND user_id=$2", vid, user_id)
+        f"SELECT {_DETAIL_COLS} FROM mikevideo.videos WHERE id=$1 AND user_id=$2",
+        vid, user_id)
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    base = f"/media/{user_id}/{video_id}"
-    ready = r["status"] == "ready"
-    captions_ready = r["transcript_status"] == "ready"
-    return {
-        "id": video_id,
-        "filename": r["filename"],
-        "content_type": r["content_type"],
-        "status": r["status"],
-        "error": r["error"],
-        "duration_sec": r["duration_sec"],
-        "width": r["width"],
-        "height": r["height"],
-        "display_width": r["display_width"],
-        "display_height": r["display_height"],
-        "orientation": r["orientation"],
-        "aspect_ratio": r["aspect_ratio"],
-        "rotation": r["rotation"],
-        "video_codec": r["video_codec"],
-        "audio_codec": r["audio_codec"],
-        "pix_fmt": r["pix_fmt"],
-        "fps": r["fps"],
-        "video_bitrate": r["video_bitrate"],
-        "audio_bitrate": r["audio_bitrate"],
-        "overall_bitrate": r["overall_bitrate"],
-        "has_audio": r["has_audio"],
-        "audio_channels": r["audio_channels"],
-        "audio_sample_rate": r["audio_sample_rate"],
-        "color_primaries": r["color_primaries"],
-        "color_transfer": r["color_transfer"],
-        "color_space": r["color_space"],
-        "is_hdr": r["is_hdr"],
-        "spoken_language": r["spoken_language"],
-        "language_confidence": r["language_confidence"],
-        "transcript_status": r["transcript_status"],
-        "has_speech": r["has_speech"],
-        "ai_title": r["ai_title"],
-        "ai_summary": r["ai_summary"],
-        "ai_tags": list(r["ai_tags"]) if r["ai_tags"] else None,
-        "ai_chapters": _jsonb(r["ai_chapters"]),
-        "enrich_status": r["enrich_status"],
-        "bytes": r["bytes"],
-        "hls_url": f"{base}/hls/master.m3u8" if ready else None,
-        "mp4_url": f"{base}/video.mp4" if ready else None,
-        "thumb_url": f"{base}/thumb.jpg" if ready else None,
-        "captions_url": f"{base}/captions/{r['spoken_language'] or 'und'}.vtt" if captions_ready else None,
-        "taken_at": _iso(r["taken_at"]),
-        "created_at": _iso(r["created_at"]),
-    }
+    return _detail_payload(r, is_owner=True)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/public/videos/{id} — NO AUTH. Only returns PUBLIC videos (shared links).
+# Private videos 404 here regardless of who asks.
+# ---------------------------------------------------------------------------
+@app.get("/api/public/videos/{video_id}")
+async def get_public_video(video_id: str):
+    try:
+        vid = uuid.UUID(video_id)
+    except ValueError:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    r = await db.pool().fetchrow(
+        f"SELECT {_DETAIL_COLS} FROM mikevideo.videos"
+        " WHERE id=$1 AND visibility='public' AND status='ready'", vid)
+    if r is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return _detail_payload(r, is_owner=False)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/videos/{id}/visibility {visibility: private|public} — owner only
+# ---------------------------------------------------------------------------
+@app.post("/api/videos/{video_id}/visibility")
+async def set_visibility(video_id: str, request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        vid = uuid.UUID(video_id)
+    except ValueError:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    vis = str(body.get("visibility") or "").lower()
+    if vis not in ("private", "public"):
+        return JSONResponse({"error": "visibility must be private|public"}, status_code=400)
+    # never-trust-200: only flips a row the caller actually owns.
+    row = await db.pool().fetchrow(
+        "UPDATE mikevideo.videos SET visibility=$3,"
+        " published_at=CASE WHEN $3='public' AND published_at IS NULL THEN now() ELSE published_at END,"
+        " updated_at=now() WHERE id=$1 AND user_id=$2 RETURNING id, visibility, published_at",
+        vid, user_id, vis)
+    if row is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"id": str(row["id"]), "visibility": row["visibility"],
+            "published_at": _iso(row["published_at"])}
 
 
 # ---------------------------------------------------------------------------
