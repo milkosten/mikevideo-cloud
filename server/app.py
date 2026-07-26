@@ -1411,17 +1411,22 @@ async def serve_media(user_id: str, video_id: str, path: str, request: Request):
 # ---------------------------------------------------------------------------
 # Browser web app
 # ---------------------------------------------------------------------------
+# The SPA is self-contained and ships fixes inline, so never let a browser serve a
+# stale copy — always revalidate (a cached old index.html can break playback/features).
+_NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     f = WEB_DIR / "index.html"
-    return HTMLResponse(f.read_text())
+    return HTMLResponse(f.read_text(), headers=_NO_CACHE)
 
 
 @app.get("/auth/callback", response_class=HTMLResponse)
 async def auth_callback():
     # OAuth redirect target — the SPA reads ?code&state and exchanges it.
     f = WEB_DIR / "index.html"
-    return HTMLResponse(f.read_text())
+    return HTMLResponse(f.read_text(), headers=_NO_CACHE)
 
 
 @app.get("/hls.js")
