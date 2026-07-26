@@ -479,36 +479,11 @@ function mountPlayer(v){
     t.srclang=v.spoken_language||'und'; t.label=(v.spoken_language||'CC').toUpperCase(); video.appendChild(t); }
   p.appendChild(video);
   if(hls){hls.destroy();hls=null;}
-  // Robust autoplay: browsers block UNMUTED autoplay once the click gesture goes
-  // stale (card-click → async fetch → mount). Try with sound; on rejection, mute and
-  // retry so the video ALWAYS starts (the user can unmute via the controls).
-  const startPlay=()=>{ const pr=video.play(); if(pr&&pr.catch) pr.catch(()=>{ video.muted=true; const p2=video.play(); if(p2&&p2.catch) p2.catch(()=>{}); }); };
-  video.addEventListener('canplay', startPlay, {once:true});       // start as soon as playable
-  // Last-resort fallback: progressive MP4 (native H.264) if HLS/hls.js can't play.
-  let usedMp4=false;
-  const useMp4=()=>{ if(usedMp4||!v.mp4_url) return; usedMp4=true; try{ if(hls){hls.destroy();hls=null;} }catch(e){}
-    video.src=v.mp4_url; video.load(); video.addEventListener('loadedmetadata',startPlay,{once:true}); };
-  if(video.canPlayType('application/vnd.apple.mpegurl')){          // Safari — native HLS
-    video.src=v.hls_url;
-    video.addEventListener('loadedmetadata',startPlay,{once:true});
-    video.addEventListener('error',useMp4,{once:true});
-  } else if(window.Hls && Hls.isSupported()){                       // Chrome/Firefox — hls.js
-    hls=new Hls({maxBufferLength:24});
-    hls.loadSource(v.hls_url); hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, startPlay);
-    hls.on(Hls.Events.ERROR,(e,d)=>{
-      if(!d||!d.fatal) return;
-      if(/[Ii]ncompatibleCodecs/.test(d.details||'')){ useMp4(); return; }   // native MP4 instead
-      if(d.type===Hls.ErrorTypes.NETWORK_ERROR){ try{hls.startLoad();}catch(e){} }
-      else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){ try{hls.recoverMediaError();}catch(e){ useMp4(); } }
-      else useMp4();                                                // unrecoverable → MP4
-    });
-  } else { useMp4(); }                                              // no HLS support at all
-  // Watchdog: if HLS produces NO playable data within a few seconds (hls.js stalled
-  // for any reason on this browser), hard-switch to the progressive MP4 — the media
-  // is plain H.264 so the native <video> just plays it. Guarantees the video starts.
-  const guard=setTimeout(()=>{ if(!usedMp4 && video.readyState<2) useMp4(); }, 6000);
-  video.addEventListener('playing',()=>clearTimeout(guard));
+  // Known-good player: native HLS on Safari, hls.js on Chrome/Firefox, MP4 otherwise.
+  // (Reverted the autoplay/watchdog/MP4-swap experiment — it regressed real playback.)
+  if(video.canPlayType('application/vnd.apple.mpegurl')) video.src=v.hls_url;
+  else if(window.Hls && Hls.isSupported()){ hls=new Hls({maxBufferLength:24}); hls.loadSource(v.hls_url); hls.attachMedia(video); }
+  else video.src=v.mp4_url;
   window._video=video;
   wireEngagement(v, video);   // count view · resume · save progress
 }
