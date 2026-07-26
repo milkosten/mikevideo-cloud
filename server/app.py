@@ -33,9 +33,9 @@ app = FastAPI(title="mikevideo-cloud")
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
-# IdP base for the web login proxy ("Sign in with MikeOS" — email/password).
-IDP_URL = os.environ.get(
-    "MIKEOSCOMPUTERS_URL", "https://mikeoscomputers-production.up.railway.app").rstrip("/")
+# OAuth Authorization Server (account.osmike.com) — the web PKCE token exchange
+# is proxied through here so the browser hits one origin (no CORS on the AS).
+OAUTH_ISSUER = os.environ.get("ACCOUNT_OSMIKE_ISSUER", "https://account.osmike.com").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -142,38 +142,29 @@ async def health():
 
 
 # ---------------------------------------------------------------------------
-# "Sign in with MikeOS" — thin proxy to the IdP so the browser talks to one
-# origin (no CORS). Returns the IdP's {token, user}; the web sends `token` as
-# a Bearer, which authenticate() validates via the cached session path.
+# "Sign in with MikeOS" — Authorization Code + PKCE (ecosystem/AUTHENTICATION.md
+# ROLE 3). The browser does the /oauth/authorize redirect itself; only the code
+# (and refresh) exchange is proxied here so it isn't blocked by CORS on the AS.
+# The client is public (PKCE, no secret), so there's nothing sensitive to hold.
 # ---------------------------------------------------------------------------
-async def _auth_proxy(request: Request, path: str):
+@app.post("/api/oauth/token")
+async def oauth_token(request: Request):
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
-    email = str(body.get("email") or "").strip()
-    password = str(body.get("password") or "")
-    if not email or not password:
-        return JSONResponse({"error": "email and password required"}, status_code=400)
+    # Only forward the standard OAuth token-exchange fields (public client, PKCE).
+    allowed = ("grant_type", "code", "code_verifier", "client_id", "redirect_uri",
+               "refresh_token", "scope")
+    payload = {k: body[k] for k in allowed if k in body}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(f"{IDP_URL}{path}",
-                                  json={"email": email, "password": password})
+            r = await client.post(f"{OAUTH_ISSUER}/oauth/token", json=payload)
         data = r.json()
     except Exception as e:
-        logger.warning("auth proxy %s failed: %s", path, e)
-        return JSONResponse({"error": "identity service unavailable"}, status_code=502)
+        logger.warning("oauth token exchange failed: %s", e)
+        return JSONResponse({"error": "auth server unavailable"}, status_code=502)
     return JSONResponse(data, status_code=r.status_code)
-
-
-@app.post("/api/auth/login")
-async def auth_login(request: Request):
-    return await _auth_proxy(request, "/api/auth/login")
-
-
-@app.post("/api/auth/register")
-async def auth_register(request: Request):
-    return await _auth_proxy(request, "/api/auth/register")
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +660,13 @@ async def serve_media(user_id: str, video_id: str, path: str, request: Request):
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def index():
+    f = WEB_DIR / "index.html"
+    return HTMLResponse(f.read_text())
+
+
+@app.get("/auth/callback", response_class=HTMLResponse)
+async def auth_callback():
+    # OAuth redirect target — the SPA reads ?code&state and exchanges it.
     f = WEB_DIR / "index.html"
     return HTMLResponse(f.read_text())
 

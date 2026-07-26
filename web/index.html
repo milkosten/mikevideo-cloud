@@ -208,7 +208,11 @@
 <script>
 const CHUNK = 4 * 1024 * 1024;
 let TOKEN = localStorage.getItem('mikevideo_token') || '';
+let REFRESH = localStorage.getItem('mikevideo_refresh') || '';
 let USER = JSON.parse(localStorage.getItem('mikevideo_user') || 'null');
+// "Sign in with MikeOS" — OAuth 2.0 Authorization Code + PKCE (ecosystem/AUTHENTICATION.md ROLE 3).
+const OAUTH = { issuer:'https://account.osmike.com', client:'mikevideo-web',
+  redirect: location.origin+'/auth/callback', scope:'openid email video.read video.write' };
 let LIB = [];                 // cached owner library
 
 const $ = s => document.querySelector(s);
@@ -234,10 +238,12 @@ function renderAccount(){
     const initial=(USER&&USER.email)?USER.email[0].toUpperCase():'M';
     a.innerHTML=`<button class="keydot on" title="${esc((USER&&USER.email)||'')} — sign out" onclick="signOut()">${initial}</button>`;
   } else {
-    a.innerHTML=`<button class="btn ghost" onclick="openLogin()">Sign in</button>`;
+    a.innerHTML=`<button class="btn ghost" onclick="startOAuth()">Sign in</button>`;
   }
 }
-function signOut(){ TOKEN=''; USER=null; localStorage.removeItem('mikevideo_token'); localStorage.removeItem('mikevideo_user'); renderAccount(); go(''); route(); toast('Signed out'); }
+function signOut(){ TOKEN=''; REFRESH=''; USER=null;
+  ['mikevideo_token','mikevideo_refresh','mikevideo_user'].forEach(k=>localStorage.removeItem(k));
+  renderAccount(); go(''); route(); toast('Signed out'); }
 
 /* ---------------- router ---------------- */
 function go(hash){ location.hash = hash; }
@@ -258,7 +264,7 @@ window.addEventListener('hashchange', route);
 /* ---------------- home ---------------- */
 async function loadLibrary(){
   if(!TOKEN) return [];
-  try{ const r=await fetch('/api/videos',{headers:hdr()}); if(!r.ok) return []; LIB=(await r.json()).videos||[]; return LIB; }
+  try{ const r=await afetch('/api/videos'); if(!r.ok) return []; LIB=(await r.json()).videos||[]; return LIB; }
   catch(e){ return []; }
 }
 function videoCard(v){
@@ -287,7 +293,7 @@ async function renderHome(){
       <div style="font-size:44px;margin-bottom:14px">▶</div>
       <div style="font-size:20px;font-weight:700">Nothing public yet</div>
       <p style="max-width:44ch;margin:10px auto 18px;color:var(--muted)">Sign in to see your own library and upload — or open a shared link to watch.</p>
-      <button class="btn primary" onclick="openLogin()" style="display:inline-flex">Sign in with MikeOS</button></div>`; return; }
+      <button class="btn primary" onclick="startOAuth()" style="display:inline-flex">Sign in with MikeOS</button></div>`; return; }
     g.innerHTML = vids.map(videoCard).join('');
     return;
   }
@@ -314,7 +320,7 @@ let hls=null;
 async function fetchVideo(id){
   // Owner first (if connected), else the public endpoint (shared links).
   if(TOKEN){
-    const r=await fetch('/api/videos/'+id,{headers:hdr()});
+    const r=await afetch('/api/videos/'+id);
     if(r.ok) return await r.json();
   }
   const p=await fetch('/api/public/videos/'+id);
@@ -373,7 +379,7 @@ function renderWatchInfo(v){
 }
 async function loadTranscript(id){
   try{
-    const r = TOKEN ? await fetch('/api/videos/'+id+'/transcript',{headers:hdr()}) : null;
+    const r = TOKEN ? await afetch('/api/videos/'+id+'/transcript') : null;
     if(!r || !r.ok) return;
     const t=await r.json();
     if(!t.segments || !t.segments.length) return;
@@ -417,7 +423,7 @@ async function renderSearch(q){
   view.innerHTML = `<div class="sectitle">Results for “${esc(q)}”</div><div id="results" class="results"></div>`;
   if(!TOKEN){ $('#results').innerHTML='<div class="hint">Sign in to search your videos.</div>'; return; }
   try{
-    const r=await fetch('/api/search?q='+encodeURIComponent(q),{headers:hdr()});
+    const r=await afetch('/api/search?q='+encodeURIComponent(q));
     const {results}=await r.json();
     if(!results.length){ $('#results').innerHTML=`<div class="empty">No spoken matches for “${esc(q)}”.</div>`; return; }
     $('#results').innerHTML = results.map(it=>{
@@ -432,46 +438,61 @@ async function renderSearch(q){
   }catch(e){ $('#results').innerHTML='<div class="hint">Search failed.</div>'; }
 }
 
-/* ---------------- Sign in with MikeOS (email + password) ---------------- */
+/* ---------------- Sign in with MikeOS — OAuth Auth Code + PKCE ---------------- */
 function modal(html){ const d=document.createElement('div'); d.className='modal'; d.innerHTML=`<div class="sheet">${html}</div>`;
   d.addEventListener('click',e=>{ if(e.target===d) d.remove(); }); document.body.appendChild(d); return d; }
-let _authMode='login';
-function openLogin(){
-  const reg=_authMode==='register';
-  const d=modal(`<button class="close" onclick="this.closest('.modal').remove()">×</button>
-    <h3>${reg?'Create your MikeOS account':'Sign in with MikeOS'}</h3>
-    <p>${reg?'Email and a password — no phone number.':'One account for all of MikeOS.'}</p>
-    <div style="display:flex;flex-direction:column;gap:10px">
-      <input id="lemail" type="email" placeholder="Email" autocomplete="email">
-      <input id="lpass" type="password" placeholder="Password" autocomplete="${reg?'new-password':'current-password'}">
-      <button class="btn primary" id="lgo" style="justify-content:center;padding:11px">${reg?'Create account':'Sign in'}</button>
-      <div id="lerr" class="hint" style="color:var(--err);min-height:1em"></div>
-      <div class="hint" style="text-align:center">${reg?'Already have an account?':'New to MikeOS?'}
-        <a href="#" id="ltoggle" style="color:var(--peri);font-weight:600">${reg?'Sign in':'Create one'}</a></div>
-    </div>`);
-  const email=d.querySelector('#lemail'), pass=d.querySelector('#lpass'), err=d.querySelector('#lerr');
-  email.focus();
-  d.querySelector('#ltoggle').onclick=(e)=>{ e.preventDefault(); _authMode=reg?'login':'register'; d.remove(); openLogin(); };
-  const submit=async()=>{
-    const e=email.value.trim(), p=pass.value;
-    if(!e||!p){ err.textContent='Email and password required.'; return; }
-    err.textContent=''; d.querySelector('#lgo').textContent='…';
-    try{
-      const r=await fetch('/api/auth/'+(reg?'register':'login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:e,password:p})});
-      const data=await r.json().catch(()=>({}));
-      if(!r.ok || !data.token){ err.textContent=data.error||(reg?'Could not create account':'Wrong email or password'); d.querySelector('#lgo').textContent=reg?'Create account':'Sign in'; return; }
-      TOKEN=data.token; USER=data.user||{email:e};
-      localStorage.setItem('mikevideo_token',TOKEN); localStorage.setItem('mikevideo_user',JSON.stringify(USER));
-      renderAccount(); d.remove(); go(''); route(); toast(reg?'Welcome to MikeOS':'Signed in');
-    }catch(ex){ err.textContent='Network error.'; d.querySelector('#lgo').textContent=reg?'Create account':'Sign in'; }
-  };
-  d.querySelector('#lgo').onclick=submit;
-  pass.addEventListener('keydown',ev=>{ if(ev.key==='Enter') submit(); });
+function _b64url(buf){ return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function _rand(n){ const a=new Uint8Array(n); crypto.getRandomValues(a); return _b64url(a.buffer); }
+async function _s256(str){ const d=await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str)); return _b64url(d); }
+async function startOAuth(){
+  const verifier=_rand(48), state=_rand(16);
+  sessionStorage.setItem('pkce_v',verifier); sessionStorage.setItem('pkce_s',state);
+  const u=new URL(OAUTH.issuer+'/oauth/authorize');
+  u.searchParams.set('response_type','code'); u.searchParams.set('client_id',OAUTH.client);
+  u.searchParams.set('redirect_uri',OAUTH.redirect); u.searchParams.set('scope',OAUTH.scope);
+  u.searchParams.set('state',state);
+  u.searchParams.set('code_challenge', await _s256(verifier)); u.searchParams.set('code_challenge_method','S256');
+  location.href=u.toString();     // full-page redirect to account.osmike.com
+}
+function setTokens(d){
+  TOKEN=d.access_token; if(d.refresh_token) REFRESH=d.refresh_token;
+  localStorage.setItem('mikevideo_token',TOKEN); if(REFRESH) localStorage.setItem('mikevideo_refresh',REFRESH);
+  try{ const claims=JSON.parse(atob((d.id_token||TOKEN).split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
+    if(claims.email){ USER={email:claims.email}; localStorage.setItem('mikevideo_user',JSON.stringify(USER)); } }catch(e){}
+}
+async function tryRefresh(){
+  if(!REFRESH) return false;
+  try{ const r=await fetch('/api/oauth/token',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({grant_type:'refresh_token',refresh_token:REFRESH,client_id:OAUTH.client})});
+    const d=await r.json(); if(r.ok && d.access_token){ setTokens(d); return true; } }catch(e){}
+  return false;
+}
+// Authed fetch that transparently refreshes the token once on a 401.
+async function afetch(url, opts){
+  opts=opts||{}; let r=await fetch(url, Object.assign({}, opts, {headers:hdr(opts.headers||{})}));
+  if(r.status===401 && TOKEN && await tryRefresh()){ r=await fetch(url, Object.assign({}, opts, {headers:hdr(opts.headers||{})})); }
+  return r;
+}
+async function handleCallback(){
+  const q=new URLSearchParams(location.search);
+  const code=q.get('code'), state=q.get('state'), err=q.get('error');
+  const v=sessionStorage.getItem('pkce_v'), s=sessionStorage.getItem('pkce_s');
+  sessionStorage.removeItem('pkce_v'); sessionStorage.removeItem('pkce_s');
+  history.replaceState({},'', '/');
+  if(err || !code || !state || state!==s || !v){ renderAccount(); route(); if(err) toast('Sign-in cancelled'); return; }
+  try{
+    const r=await fetch('/api/oauth/token',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({grant_type:'authorization_code',code,code_verifier:v,client_id:OAUTH.client,redirect_uri:OAUTH.redirect})});
+    const d=await r.json();
+    if(!r.ok || !d.access_token){ renderAccount(); route(); toast('Sign-in failed'); return; }
+    setTokens(d); toast('Signed in');
+  }catch(e){ toast('Sign-in failed'); }
+  renderAccount(); go(''); route();
 }
 
 /* ---------------- upload ---------------- */
 function openUpload(){
-  if(!TOKEN){ openLogin(); return; }
+  if(!TOKEN){ startOAuth(); return; }
   const d=modal(`<button class="close" onclick="this.closest('.modal').remove()">×</button>
     <h3>Upload a video</h3><p>Chunked &amp; resumable — big files never overload your device.</p>
     <div class="drop" id="drop"><div class="ic">↑</div><div class="big">Drop a video or click to choose</div>
@@ -536,8 +557,8 @@ async function uploadFile(file, box){
 }
 
 /* ---------------- boot ---------------- */
-renderAccount();
-route();
+if(location.pathname==='/auth/callback'){ handleCallback(); }
+else { renderAccount(); route(); }
 // live-refresh the home grid so encoding→ready + new transcripts/titles surface
 setInterval(()=>{ if(parseHash().v==='home' && TOKEN) loadLibrary().then(v=>drawGrid(_filter,v)); }, 9000);
 </script>
