@@ -80,6 +80,8 @@
   .statepill.encoding{background:rgba(255,207,92,.9);color:#211800}
   .statepill.uploading{background:rgba(255,138,91,.9);color:#210b00}
   .statepill.failed{background:rgba(255,107,107,.92);color:#210000}
+  .pbar{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.28)}
+  .pbar>i{display:block;height:100%;background:var(--rose)}
   .cmeta{display:flex;gap:11px;margin-top:11px}
   .cmeta .av{width:34px;height:34px;border-radius:50%;background:var(--grad);flex:none;margin-top:1px}
   .ctitle{font-size:14.5px;font-weight:600;line-height:1.3;max-height:2.6em;overflow:hidden;
@@ -267,6 +269,28 @@ async function loadLibrary(){
   try{ const r=await afetch('/api/videos'); if(!r.ok) return []; LIB=(await r.json()).videos||[]; return LIB; }
   catch(e){ return []; }
 }
+function fmtCount(n){ n=+n||0; if(n<1000) return ''+n; if(n<1e6) return (n/1e3).toFixed(n<1e4?1:0).replace(/\.0$/,'')+'K'; return (n/1e6).toFixed(1).replace(/\.0$/,'')+'M'; }
+function fmtViews(n){ n=+n||0; return n>0 ? fmtCount(n)+(n===1?' view · ':' views · ') : ''; }
+function wireEngagement(v, video){
+  try{ fetch('/api/videos/'+v.id+'/view',{method:'POST'}); }catch(e){}   // count a view
+  if(v.progress_sec && v.progress_sec>5){                                  // resume
+    const doSeek=()=>{ try{ if(video.currentTime<1) video.currentTime=v.progress_sec; }catch(e){} };
+    video.addEventListener('loadedmetadata',doSeek,{once:true}); video.addEventListener('canplay',doSeek,{once:true});
+  }
+  if(TOKEN){ let last=0;                                                    // save progress
+    const save=()=>{ const pos=video.currentTime||0; if(pos<1) return; last=Date.now();
+      try{ fetch('/api/videos/'+v.id+'/progress',{method:'PUT',headers:hdr({'Content-Type':'application/json'}),
+        body:JSON.stringify({position_sec:pos,duration_sec:video.duration||v.duration_sec||null})}); }catch(e){} };
+    video.addEventListener('timeupdate',()=>{ if(Date.now()-last>5000) save(); });
+    video.addEventListener('pause',save); window.addEventListener('beforeunload',save);
+  }
+}
+async function toggleLike(id){
+  if(!TOKEN){ startOAuth(); return; }
+  const btn=$('#likebtn'); if(!btn) return; const liked=btn.classList.contains('on');
+  try{ const r=await afetch('/api/videos/'+id+'/like',{method:liked?'DELETE':'POST'});
+    const d=await r.json(); if(r.ok){ btn.classList.toggle('on', d.liked); const c=$('#likecount'); if(c) c.textContent=fmtCount(d.likes); } }catch(e){}
+}
 function videoCard(v){
   const ready = v.status==='ready';
   const state = ready ? '' : `<span class="statepill ${v.status}">${v.status}</span>`;
@@ -275,11 +299,12 @@ function videoCard(v){
   const contain = v.orientation==='portrait' ? 'contain':'';
   const img = v.thumb_url? `<img class="" src="${v.thumb_url}" loading="lazy">` : '<span class="ph">▶</span>';
   const cc = ccLang(v)? `<span class="cc"> · CC ${ccLang(v)}</span>`:'';
+  const pbar = (v.progress_sec&&v.duration_sec)? `<div class="pbar"><i style="width:${Math.min(100,v.progress_sec/v.duration_sec*100)}%"></i></div>`:'';
   return `<div class="card" onclick="${ready?`go('watch=${v.id}')`:''}">
-    <div class="thumb ${contain}">${img}${vis||state}${dur}</div>
+    <div class="thumb ${contain}">${img}${vis||state}${dur}${pbar}</div>
     <div class="cmeta"><div class="av"></div><div>
       <div class="ctitle">${esc(titleOf(v))}</div>
-      <div class="csub">${ago(v.created_at)}${cc}</div>
+      <div class="csub">${fmtViews(v.view_count)}${ago(v.created_at)}${cc}</div>
     </div></div></div>`;
 }
 async function renderHome(){
@@ -297,12 +322,16 @@ async function renderHome(){
     g.innerHTML = vids.map(videoCard).join('');
     return;
   }
-  view.innerHTML = `<div class="filters"><button class="chip on" data-f="all" onclick="setFilter('all')">All</button>
+  view.innerHTML = `<div id="continue"></div>
+    <div class="filters"><button class="chip on" data-f="all" onclick="setFilter('all')">All</button>
     <button class="chip" data-f="public" onclick="setFilter('public')">Public</button>
     <button class="chip" data-f="private" onclick="setFilter('private')">Private</button></div>
     <div id="grid" class="grid"></div>`;
   const vids = await loadLibrary();
   drawGrid('all', vids);
+  try{ const r=await afetch('/api/me/continue'); const cw=((await r.json()).videos)||[];
+    if(cw.length){ $('#continue').innerHTML=`<div class="sectitle">Continue watching</div>
+      <div class="grid" style="margin-bottom:28px">${cw.map(videoCard).join('')}</div>`; } }catch(e){}
 }
 let _filter='all';
 function setFilter(f){ _filter=f; document.querySelectorAll('.chip[data-f]').forEach(c=>c.classList.toggle('on',c.dataset.f===f)); drawGrid(f, LIB); }
@@ -351,6 +380,7 @@ function mountPlayer(v){
   else if(window.Hls && Hls.isSupported()){ hls=new Hls({maxBufferLength:24}); hls.loadSource(v.hls_url); hls.attachMedia(video); }
   else video.src=v.mp4_url;
   window._video=video;
+  wireEngagement(v, video);   // count view · resume · save progress
 }
 function seekTo(sec){ if(window._video){ try{ window._video.currentTime=sec; window._video.play(); }catch(e){} } }
 function renderWatchInfo(v){
@@ -366,14 +396,16 @@ function renderWatchInfo(v){
   if(v.ai_chapters&&v.ai_chapters.length) chapters=`<div class="chapters"><h4>Chapters</h4>`+
     v.ai_chapters.map(c=>`<div class="chap" onclick="seekTo(${Number(c.start)||0})"><span class="t">${fmtDur(c.start)}</span><span>${esc(c.title||'')}</span></div>`).join('')+`</div>`;
   const info=$('#winfo');
+  const likeBtn = `<button class="pill ${v.liked?'on':''}" id="likebtn" onclick="toggleLike('${v.id}')">👍 <span id="likecount">${fmtCount(v.likes||0)}</span></button>`;
   info.innerHTML = `<h1 class="wt">${esc(titleOf(v))}</h1>
     <div class="wactions">
+      ${likeBtn}
       ${visBtn}
       <button class="pill" onclick="share('${v.id}',${v.visibility==='public'})">🔗 Share</button>
       ${owner?`<button class="pill" onclick="copyLink('${v.id}')">Copy link</button>`:''}
       <div class="spacer"></div>
     </div>
-    <div class="desc"><div class="dmeta">${esc(ago(v.created_at))}${meta?'  ·  '+esc(meta):''}</div>${ai||'<span class="hint">No description yet.</span>'}${chapters}</div>
+    <div class="desc"><div class="dmeta">${fmtViews(v.view_count)}${esc(ago(v.created_at))}${meta?'  ·  '+esc(meta):''}</div>${ai||'<span class="hint">No description yet.</span>'}${chapters}</div>
     <div id="trbox"></div>`;
   if(v.transcript_status==='ready') loadTranscript(v.id);
 }

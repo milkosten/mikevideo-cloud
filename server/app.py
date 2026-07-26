@@ -176,7 +176,7 @@ async def public_feed():
     rows = await db.pool().fetch(
         "SELECT id, user_id, filename, ai_title, duration_sec, display_width,"
         " display_height, orientation, spoken_language, transcript_status,"
-        " created_at, published_at FROM mikevideo.videos"
+        " view_count, created_at, published_at FROM mikevideo.videos"
         " WHERE visibility='public' AND status='ready'"
         " ORDER BY published_at DESC NULLS LAST, created_at DESC LIMIT 200")
     out = []
@@ -194,6 +194,7 @@ async def public_feed():
             "spoken_language": r["spoken_language"],
             "transcript_status": r["transcript_status"],
             "visibility": "public",
+            "view_count": r["view_count"],
             "thumb_url": _thumb_url(r["user_id"], vid),
             "created_at": _iso(r["created_at"]),
             "published_at": _iso(r["published_at"]),
@@ -312,7 +313,7 @@ async def list_videos(request: Request):
         "SELECT id, filename, status, duration_sec, width, height,"
         " display_width, display_height, orientation, aspect_ratio, rotation,"
         " fps, has_audio, spoken_language, transcript_status, ai_title,"
-        " enrich_status, visibility, bytes, taken_at, created_at FROM mikevideo.videos"
+        " enrich_status, visibility, view_count, bytes, taken_at, created_at FROM mikevideo.videos"
         " WHERE user_id=$1 ORDER BY created_at DESC LIMIT 500", user_id)
     out = []
     for r in rows:
@@ -336,6 +337,7 @@ async def list_videos(request: Request):
             "ai_title": r["ai_title"],
             "enrich_status": r["enrich_status"],
             "visibility": r["visibility"],
+            "view_count": r["view_count"],
             "bytes": r["bytes"],
             "thumb_url": _thumb_url(user_id, vid) if r["status"] == "ready" else None,
             "taken_at": _iso(r["taken_at"]),
@@ -353,7 +355,7 @@ _DETAIL_COLS = (
     " audio_sample_rate, color_primaries, color_transfer, color_space,"
     " is_hdr, spoken_language, language_confidence, transcript_status,"
     " has_speech, ai_title, ai_summary, ai_tags, ai_chapters, enrich_status,"
-    " visibility, bytes, taken_at, created_at, published_at"
+    " visibility, view_count, bytes, taken_at, created_at, published_at"
 )
 
 
@@ -389,6 +391,7 @@ def _detail_payload(r, is_owner: bool) -> dict:
         "ai_tags": list(r["ai_tags"]) if r["ai_tags"] else None,
         "ai_chapters": _jsonb(r["ai_chapters"]),
         "visibility": r["visibility"],
+        "view_count": r["view_count"],
         "bytes": r["bytes"],
         "duration": r["duration_sec"],
         "hls_url": f"{base}/hls/master.m3u8" if ready else None,
@@ -437,7 +440,24 @@ async def get_video(video_id: str, request: Request):
         vid, user_id)
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return _detail_payload(r, is_owner=True)
+    payload = _detail_payload(r, is_owner=True)
+    payload.update(await _engagement(vid, user_id))
+    return payload
+
+
+async def _engagement(video_id, viewer_user_id) -> dict:
+    """Likes count + whether the viewer liked it + their saved playback position."""
+    likes = await db.pool().fetchval(
+        "SELECT count(*) FROM mikevideo.likes WHERE video_id=$1", video_id) or 0
+    liked, position = False, None
+    if viewer_user_id:
+        liked = bool(await db.pool().fetchval(
+            "SELECT 1 FROM mikevideo.likes WHERE video_id=$1 AND user_id=$2",
+            video_id, viewer_user_id))
+        position = await db.pool().fetchval(
+            "SELECT position_sec FROM mikevideo.watch_progress"
+            " WHERE video_id=$1 AND user_id=$2", video_id, viewer_user_id)
+    return {"likes": int(likes), "liked": liked, "progress_sec": position}
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +465,7 @@ async def get_video(video_id: str, request: Request):
 # Private videos 404 here regardless of who asks.
 # ---------------------------------------------------------------------------
 @app.get("/api/public/videos/{video_id}")
-async def get_public_video(video_id: str):
+async def get_public_video(video_id: str, request: Request):
     try:
         vid = uuid.UUID(video_id)
     except ValueError:
@@ -455,7 +475,10 @@ async def get_public_video(video_id: str):
         " WHERE id=$1 AND visibility='public' AND status='ready'", vid)
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return _detail_payload(r, is_owner=False)
+    payload = _detail_payload(r, is_owner=False)
+    viewer = await authenticate(request)          # optional — personalises like/progress
+    payload.update(await _engagement(vid, viewer))
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +510,110 @@ async def set_visibility(video_id: str, request: Request):
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"id": str(row["id"]), "visibility": row["visibility"],
             "published_at": _iso(row["published_at"])}
+
+
+# ---------------------------------------------------------------------------
+# Engagement (P1): views · likes · watch progress
+# ---------------------------------------------------------------------------
+def _vid_or_400(video_id: str):
+    try:
+        return uuid.UUID(video_id)
+    except ValueError:
+        return None
+
+
+@app.post("/api/videos/{video_id}/view")
+async def add_view(video_id: str):
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    n = await db.pool().fetchval(
+        "UPDATE mikevideo.videos SET view_count=view_count+1"
+        " WHERE id=$1 AND status='ready' RETURNING view_count", vid)
+    if n is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"view_count": int(n)}
+
+
+@app.post("/api/videos/{video_id}/like")
+async def add_like(video_id: str, request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    await db.pool().execute(
+        "INSERT INTO mikevideo.likes(video_id, user_id) VALUES($1,$2)"
+        " ON CONFLICT DO NOTHING", vid, user_id)
+    likes = await db.pool().fetchval(
+        "SELECT count(*) FROM mikevideo.likes WHERE video_id=$1", vid)
+    return {"liked": True, "likes": int(likes or 0)}
+
+
+@app.delete("/api/videos/{video_id}/like")
+async def remove_like(video_id: str, request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    await db.pool().execute(
+        "DELETE FROM mikevideo.likes WHERE video_id=$1 AND user_id=$2", vid, user_id)
+    likes = await db.pool().fetchval(
+        "SELECT count(*) FROM mikevideo.likes WHERE video_id=$1", vid)
+    return {"liked": False, "likes": int(likes or 0)}
+
+
+@app.put("/api/videos/{video_id}/progress")
+async def put_progress(video_id: str, request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    try:
+        body = await request.json()
+        pos = float(body.get("position_sec") or 0)
+    except Exception:
+        return JSONResponse({"error": "position_sec required"}, status_code=400)
+    dur = body.get("duration_sec")
+    dur = float(dur) if dur is not None else None
+    await db.pool().execute(
+        "INSERT INTO mikevideo.watch_progress(video_id, user_id, position_sec, duration_sec, updated_at)"
+        " VALUES($1,$2,$3,$4,now()) ON CONFLICT (video_id, user_id) DO UPDATE"
+        " SET position_sec=EXCLUDED.position_sec, duration_sec=COALESCE(EXCLUDED.duration_sec, mikevideo.watch_progress.duration_sec),"
+        " updated_at=now()", vid, user_id, pos, dur)
+    return {"ok": True}
+
+
+@app.get("/api/me/continue")
+async def continue_watching(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    rows = await db.pool().fetch(
+        "SELECT v.id, v.user_id AS owner, v.filename, v.ai_title, v.duration_sec,"
+        " v.display_width, v.display_height, v.orientation, v.spoken_language,"
+        " v.transcript_status, v.view_count, v.created_at, w.position_sec, w.updated_at"
+        " FROM mikevideo.watch_progress w JOIN mikevideo.videos v ON v.id=w.video_id"
+        " WHERE w.user_id=$1 AND v.status='ready' AND w.position_sec > 5"
+        "   AND (v.duration_sec IS NULL OR w.position_sec < v.duration_sec*0.95)"
+        " ORDER BY w.updated_at DESC LIMIT 30", user_id)
+    out = []
+    for r in rows:
+        vid = str(r["id"])
+        out.append({
+            "id": vid, "status": "ready", "ai_title": r["ai_title"], "filename": r["filename"],
+            "duration_sec": r["duration_sec"], "display_width": r["display_width"],
+            "display_height": r["display_height"], "orientation": r["orientation"],
+            "spoken_language": r["spoken_language"], "transcript_status": r["transcript_status"],
+            "view_count": r["view_count"], "progress_sec": r["position_sec"],
+            "thumb_url": _thumb_url(r["owner"], vid), "created_at": _iso(r["created_at"]),
+        })
+    return {"videos": out}
 
 
 # ---------------------------------------------------------------------------
