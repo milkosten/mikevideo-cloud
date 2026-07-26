@@ -222,7 +222,10 @@ function ago(iso){ if(!iso) return ''; const d=(Date.now()-new Date(iso).getTime
   const u=[[31536000,'year'],[2592000,'month'],[604800,'week'],[86400,'day'],[3600,'hour'],[60,'minute']];
   for(const [s,n] of u){ if(d>=s){ const v=Math.floor(d/s); return v+' '+n+(v>1?'s':'')+' ago'; } } return 'just now'; }
 function dims(v){ const w=v.display_width||v.width,h=v.display_height||v.height; return (w&&h)?w+'×'+h:''; }
-function titleOf(v){ return v.ai_title || v.filename || 'Untitled'; }
+function fmtDate(iso){ if(!iso) return ''; try{ return new Date(iso).toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'}); }catch(e){ return ''; } }
+// Prefer the AI title; otherwise a friendly date — never a raw filename.
+function titleOf(v){ return v.ai_title || (v.created_at ? ('Clip · '+fmtDate(v.created_at)) : (v.filename||'Untitled')); }
+function ccLang(v){ return (v.transcript_status==='ready' && v.spoken_language) ? v.spoken_language.toUpperCase() : ''; }
 function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('on'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('on'),2200); }
 function setKeydot(){ const k=$('#keydot'); k.classList.toggle('on', !!API_KEY); k.textContent=API_KEY?'M':'K'; k.innerHTML=(API_KEY?'M':'K')+'<span class="ind"></span>'; }
 
@@ -255,7 +258,7 @@ function videoCard(v){
   const dur = v.duration_sec? `<span class="dur">${fmtDur(v.duration_sec)}</span>`:'';
   const contain = v.orientation==='portrait' ? 'contain':'';
   const img = v.thumb_url? `<img class="" src="${v.thumb_url}" loading="lazy">` : '<span class="ph">▶</span>';
-  const cc = v.spoken_language? `<span class="cc"> · CC ${v.spoken_language.toUpperCase()}</span>`:'';
+  const cc = ccLang(v)? `<span class="cc"> · CC ${ccLang(v)}</span>`:'';
   return `<div class="card" onclick="${ready?`go('watch=${v.id}')`:''}">
     <div class="thumb ${contain}">${img}${vis||state}${dur}</div>
     <div class="cmeta"><div class="av"></div><div>
@@ -329,7 +332,7 @@ function mountPlayer(v){
 function seekTo(sec){ if(window._video){ try{ window._video.currentTime=sec; window._video.play(); }catch(e){} } }
 function renderWatchInfo(v){
   const owner=v.is_owner;
-  const meta=[dims(v), v.spoken_language?('CC '+v.spoken_language.toUpperCase()):'', fmtDur(v.duration_sec), fmtBytes(v.bytes)].filter(Boolean).join('  ·  ');
+  const meta=[dims(v), v.captions_url?('CC '+(v.spoken_language||'').toUpperCase()):'', fmtDur(v.duration_sec), fmtBytes(v.bytes)].filter(Boolean).join('  ·  ');
   const visBtn = owner
     ? `<button class="pill ${v.visibility==='public'?'on':''}" onclick="toggleVis('${v.id}','${v.visibility}')">${v.visibility==='public'?'🌐 Public':'🔒 Private'}</button>`
     : `<span class="pill">${v.visibility==='public'?'🌐 Public':''}</span>`;
