@@ -197,6 +197,7 @@
     </form>
   </div>
   <div class="hactions">
+    <button class="btn ghost" onclick="go('playlists')" title="Playlists">☰<span class="w"> Playlists</span></button>
     <button class="btn primary" onclick="openUpload()">↑ <span class="w">Upload</span></button>
     <span id="account"></span>
   </div>
@@ -253,12 +254,16 @@ function parseHash(){
   const h = location.hash.replace(/^#/,'');
   if(h.startsWith('watch=')) return {v:'watch', id:decodeURIComponent(h.slice(6))};
   if(h.startsWith('search=')) return {v:'search', q:decodeURIComponent(h.slice(7))};
+  if(h.startsWith('playlist=')) return {v:'playlist', id:decodeURIComponent(h.slice(9))};
+  if(h==='playlists') return {v:'playlists'};
   return {v:'home'};
 }
 async function route(){
   const r = parseHash();
   if(r.v==='watch') return renderWatch(r.id);
   if(r.v==='search'){ $('#q').value=r.q; return renderSearch(r.q); }
+  if(r.v==='playlists') return renderPlaylists();
+  if(r.v==='playlist') return renderPlaylistDetail(r.id);
   return renderHome();
 }
 window.addEventListener('hashchange', route);
@@ -400,6 +405,7 @@ function renderWatchInfo(v){
   info.innerHTML = `<h1 class="wt">${esc(titleOf(v))}</h1>
     <div class="wactions">
       ${likeBtn}
+      <button class="pill" onclick="openSave('${v.id}')">➕ Save</button>
       ${visBtn}
       <button class="pill" onclick="share('${v.id}',${v.visibility==='public'})">🔗 Share</button>
       ${owner?`<button class="pill" onclick="copyLink('${v.id}')">Copy link</button>`:''}
@@ -447,6 +453,54 @@ async function share(id, isPublic){
   const url=watchLink(id);
   if(navigator.share){ try{ await navigator.share({title:'MikeVideo', url}); return; }catch(e){} }
   copyLink(id);
+}
+
+/* ---------------- playlists (P2) ---------------- */
+async function renderPlaylists(){
+  if(!TOKEN){ view.innerHTML=`<div class="empty" style="margin-top:8vh"><div style="font-size:40px">☰</div>
+    <p style="color:var(--muted);margin:12px 0 16px">Sign in to see your playlists.</p>
+    <button class="btn primary" onclick="startOAuth()" style="display:inline-flex">Sign in with MikeOS</button></div>`; return; }
+  view.innerHTML=`<div class="sectitle">Your playlists</div><div id="grid" class="grid"></div>`;
+  let pls=[]; try{ const r=await afetch('/api/playlists'); pls=((await r.json()).playlists)||[]; }catch(e){}
+  $('#grid').innerHTML = pls.map(p=>`<div class="card" onclick="go('playlist=${p.id}')">
+      <div class="thumb">${p.thumb_url?`<img src="${p.thumb_url}">`:'<span class="ph">☰</span>'}
+        <span class="dur">${p.is_system==='watch_later'?'⌚ ':''}${p.count} video${p.count===1?'':'s'}</span></div>
+      <div class="cmeta"><div class="av"></div><div><div class="ctitle">${esc(p.title)}</div>
+        <div class="csub">Playlist</div></div></div></div>`).join('')
+    + `<div class="card" onclick="newPlaylist()"><div class="thumb" style="border:1.5px dashed var(--line);background:var(--bg2)"><span class="ph">＋</span></div>
+        <div class="cmeta"><div class="av" style="background:var(--elev)"></div><div><div class="ctitle">New playlist</div></div></div></div>`;
+}
+async function newPlaylist(){ const t=prompt('Playlist name'); if(!t) return;
+  try{ const r=await afetch('/api/playlists',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t})});
+    if(r.ok){ renderPlaylists(); toast('Playlist created'); } }catch(e){} }
+async function renderPlaylistDetail(id){
+  view.innerHTML=`<div id="phead"></div><div id="grid" class="grid"></div>`;
+  try{ const r=await afetch('/api/playlists/'+id); if(!r.ok){ view.innerHTML='<div class="empty">Playlist not found.</div>'; return; }
+    const p=await r.json();
+    $('#phead').innerHTML=`<div class="wactions" style="border:none;padding-bottom:12px"><a href="#playlists" onclick="go('playlists')" style="color:var(--muted)">← Playlists</a>
+      <h1 class="wt" style="margin:0 0 0 6px">${esc(p.title)}</h1><div class="spacer"></div>
+      ${p.is_system?'':`<button class="pill" onclick="deletePlaylist('${id}')">🗑 Delete</button>`}</div>`;
+    $('#grid').innerHTML = p.videos.length? p.videos.map(videoCard).join('') : `<div class="empty" style="grid-column:1/-1">Empty — add videos with the Save button.</div>`;
+  }catch(e){ view.innerHTML='<div class="empty">Could not load playlist.</div>'; }
+}
+async function deletePlaylist(id){ if(!confirm('Delete this playlist?')) return;
+  try{ const r=await afetch('/api/playlists/'+id,{method:'DELETE'}); if(r.ok){ go('playlists'); toast('Deleted'); } }catch(e){} }
+async function openSave(videoId){
+  if(!TOKEN){ startOAuth(); return; }
+  let pls=[]; try{ const r=await afetch('/api/playlists?video_id='+videoId); pls=((await r.json()).playlists)||[]; }catch(e){}
+  const rows=pls.map(p=>`<label style="display:flex;align-items:center;gap:11px;padding:10px 2px;cursor:pointer">
+    <input type="checkbox" data-pl="${p.id}" ${p.has?'checked':''}>
+    <span>${p.is_system==='watch_later'?'⌚ ':''}${esc(p.title)}</span></label>`).join('');
+  const d=modal(`<button class="close" onclick="this.closest('.modal').remove()">×</button>
+    <h3>Save to…</h3><div style="max-height:42vh;overflow:auto">${rows||'<span class="hint">No playlists yet.</span>'}</div>
+    <div class="row" style="margin-top:12px"><input id="npl" type="text" placeholder="New playlist name">
+      <button class="btn primary" id="npadd">Create &amp; add</button></div>`);
+  d.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.onchange=async()=>{ const pl=cb.dataset.pl;
+    try{ if(cb.checked) await afetch('/api/playlists/'+pl+'/items',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video_id:videoId})});
+      else await afetch('/api/playlists/'+pl+'/items/'+videoId,{method:'DELETE'}); toast(cb.checked?'Saved':'Removed'); }catch(e){} });
+  d.querySelector('#npadd').onclick=async()=>{ const t=d.querySelector('#npl').value.trim(); if(!t) return;
+    try{ const r=await afetch('/api/playlists',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t})}); const np=await r.json();
+      await afetch('/api/playlists/'+np.id+'/items',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video_id:videoId})}); d.remove(); toast('Saved'); }catch(e){} };
 }
 
 /* ---------------- search ---------------- */

@@ -666,6 +666,171 @@ def _best_segment(segments, terms: list[str]) -> dict | None:
     return {"start": float(first.get("start") or 0), "text": (first.get("text") or "").strip()}
 
 
+# ---------------------------------------------------------------------------
+# Playlists + Watch Later (P2)
+# ---------------------------------------------------------------------------
+def _pl_card(r) -> dict:
+    vid = str(r["id"])
+    return {
+        "id": vid, "status": "ready", "ai_title": r["ai_title"], "filename": r["filename"],
+        "duration_sec": r["duration_sec"], "display_width": r["display_width"],
+        "display_height": r["display_height"], "orientation": r["orientation"],
+        "spoken_language": r["spoken_language"], "transcript_status": r["transcript_status"],
+        "view_count": r["view_count"], "visibility": r["visibility"],
+        "thumb_url": _thumb_url(r["owner"], vid), "created_at": _iso(r["created_at"]),
+    }
+
+
+async def _ensure_watch_later(user_id: str):
+    row = await db.pool().fetchrow(
+        "SELECT id FROM mikevideo.playlists WHERE user_id=$1 AND is_system='watch_later'", user_id)
+    if row:
+        return row["id"]
+    try:
+        pid = uuid.uuid4()
+        await db.pool().execute(
+            "INSERT INTO mikevideo.playlists(id,user_id,title,is_system)"
+            " VALUES($1,$2,'Watch Later','watch_later')", pid, user_id)
+        return pid
+    except Exception:
+        row = await db.pool().fetchrow(
+            "SELECT id FROM mikevideo.playlists WHERE user_id=$1 AND is_system='watch_later'", user_id)
+        return row["id"] if row else None
+
+
+@app.get("/api/playlists")
+async def list_playlists(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    await _ensure_watch_later(user_id)
+    video_id = request.query_params.get("video_id")  # optional -> per-playlist `has`
+    has_vid = None
+    if video_id:
+        try:
+            has_vid = uuid.UUID(video_id)
+        except ValueError:
+            has_vid = None
+    rows = await db.pool().fetch(
+        "SELECT p.id, p.title, p.is_system, p.updated_at,"
+        " (SELECT count(*) FROM mikevideo.playlist_items i WHERE i.playlist_id=p.id) AS n,"
+        " (SELECT v.user_id||'/'||v.id FROM mikevideo.playlist_items pi"
+        "   JOIN mikevideo.videos v ON v.id=pi.video_id WHERE pi.playlist_id=p.id"
+        "   ORDER BY pi.sort_order, pi.added_at LIMIT 1) AS first_path,"
+        " ($2::uuid IS NOT NULL AND EXISTS(SELECT 1 FROM mikevideo.playlist_items x"
+        "   WHERE x.playlist_id=p.id AND x.video_id=$2)) AS has"
+        " FROM mikevideo.playlists p WHERE p.user_id=$1"
+        " ORDER BY (p.is_system IS NOT NULL) DESC, p.updated_at DESC", user_id, has_vid)
+    out = []
+    for r in rows:
+        out.append({
+            "id": str(r["id"]), "title": r["title"], "is_system": r["is_system"],
+            "count": int(r["n"] or 0), "has": bool(r["has"]),
+            "thumb_url": (f"/media/{r['first_path']}/thumb.jpg" if r["first_path"] else None),
+            "updated_at": _iso(r["updated_at"]),
+        })
+    return {"playlists": out}
+
+
+@app.post("/api/playlists")
+async def create_playlist(request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        title = str((await request.json()).get("title") or "").strip()
+    except Exception:
+        title = ""
+    if not title:
+        return JSONResponse({"error": "title required"}, status_code=400)
+    pid = uuid.uuid4()
+    await db.pool().execute(
+        "INSERT INTO mikevideo.playlists(id,user_id,title) VALUES($1,$2,$3)",
+        pid, user_id, title[:120])
+    return {"id": str(pid), "title": title[:120], "is_system": None, "count": 0, "has": False}
+
+
+@app.delete("/api/playlists/{pid}")
+async def delete_playlist(pid: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(pid)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    row = await db.pool().fetchrow(
+        "DELETE FROM mikevideo.playlists WHERE id=$1 AND user_id=$2 AND is_system IS NULL"
+        " RETURNING id", vid, user_id)
+    if row is None:
+        return JSONResponse({"error": "not found or not deletable"}, status_code=404)
+    return {"ok": True}
+
+
+@app.get("/api/playlists/{pid}")
+async def get_playlist(pid: str, request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(pid)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    p = await db.pool().fetchrow(
+        "SELECT id, title, is_system FROM mikevideo.playlists WHERE id=$1 AND user_id=$2",
+        vid, user_id)
+    if p is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    rows = await db.pool().fetch(
+        "SELECT v.id, v.user_id AS owner, v.filename, v.ai_title, v.duration_sec,"
+        " v.display_width, v.display_height, v.orientation, v.spoken_language,"
+        " v.transcript_status, v.view_count, v.visibility, v.created_at"
+        " FROM mikevideo.playlist_items pi JOIN mikevideo.videos v ON v.id=pi.video_id"
+        " WHERE pi.playlist_id=$1 AND v.status='ready' ORDER BY pi.sort_order, pi.added_at", vid)
+    return {"id": str(p["id"]), "title": p["title"], "is_system": p["is_system"],
+            "videos": [_pl_card(r) for r in rows]}
+
+
+@app.post("/api/playlists/{pid}/items")
+async def add_playlist_item(pid: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    plid = _vid_or_400(pid)
+    if plid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    try:
+        video_id = uuid.UUID(str((await request.json()).get("video_id")))
+    except Exception:
+        return JSONResponse({"error": "video_id required"}, status_code=400)
+    owned = await db.pool().fetchval(
+        "SELECT 1 FROM mikevideo.playlists WHERE id=$1 AND user_id=$2", plid, user_id)
+    if not owned:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    await db.pool().execute(
+        "INSERT INTO mikevideo.playlist_items(playlist_id, video_id, sort_order)"
+        " VALUES($1,$2, COALESCE((SELECT max(sort_order)+1 FROM mikevideo.playlist_items"
+        "   WHERE playlist_id=$1),0)) ON CONFLICT DO NOTHING", plid, video_id)
+    await db.pool().execute(
+        "UPDATE mikevideo.playlists SET updated_at=now() WHERE id=$1", plid)
+    return {"ok": True}
+
+
+@app.delete("/api/playlists/{pid}/items/{video_id}")
+async def remove_playlist_item(pid: str, video_id: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    plid, vidv = _vid_or_400(pid), _vid_or_400(video_id)
+    if plid is None or vidv is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    owned = await db.pool().fetchval(
+        "SELECT 1 FROM mikevideo.playlists WHERE id=$1 AND user_id=$2", plid, user_id)
+    if not owned:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    await db.pool().execute(
+        "DELETE FROM mikevideo.playlist_items WHERE playlist_id=$1 AND video_id=$2", plid, vidv)
+    return {"ok": True}
+
+
 @app.get("/api/search")
 async def search(request: Request):
     user_id = await _auth(request)
