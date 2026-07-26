@@ -15,6 +15,8 @@ import logging
 from typing import Optional
 
 import httpx
+import jwt
+from jwt import PyJWKClient
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,50 @@ MIKEOSCOMPUTERS_URL = os.environ.get(
     "MIKEOSCOMPUTERS_URL",
     "https://mikeoscomputers-production.up.railway.app",
 )
+
+# --- OAuth 2.0 resource server (account.osmike.com) -------------------------
+# Standard RS256 Bearer JWTs, validated LOCALLY against the published JWKS — no
+# per-request round-trip to the IdP. sub == the same user_id resolve returns, so
+# all our WHERE user_id=$1 scoping is unchanged. See docs/implement_oauth.md.
+ACCOUNT_ISSUER = os.environ.get("ACCOUNT_OSMIKE_ISSUER", "https://account.osmike.com")
+ACCOUNT_JWKS = os.environ.get("ACCOUNT_OSMIKE_JWKS_URL", f"{ACCOUNT_ISSUER}/oauth/jwks.json")
+SERVICE_AUD = os.environ.get("OAUTH_AUDIENCE", "mikevideo")
+# Lazy: constructing the client does NOT fetch keys, so this is safe even before
+# the OAuth provider is live (fetch happens on the first Bearer request).
+_jwks = PyJWKClient(ACCOUNT_JWKS, cache_keys=True, lifespan=3600)
+
+
+def _verify_bearer(token: str) -> Optional[dict]:
+    """Validate an account.osmike.com access token locally. Returns claims or None."""
+    try:
+        key = _jwks.get_signing_key_from_jwt(token).key
+        return jwt.decode(
+            token, key, algorithms=["RS256"],
+            issuer=ACCOUNT_ISSUER, audience=SERVICE_AUD,
+            options={"require": ["exp", "iss", "sub"]})
+    except Exception as e:
+        logger.warning("Bearer rejected: %s", e)
+        return None
+
+
+def _has_scope(claims: dict, needed: str) -> bool:
+    return needed in (claims.get("scope") or "").split()
+
+
+async def authenticate(request, scope: Optional[str] = None) -> Optional[str]:
+    """Return the caller's user_id, or None (caller -> 401).
+
+    Order: OAuth Bearer JWT (preferred, validated via JWKS) -> legacy X-API-KEY.
+    A present-but-invalid Bearer must 401 — it never falls through to the key path.
+    """
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth and auth.lower().startswith("bearer "):
+        claims = _verify_bearer(auth[7:].strip())
+        if claims and (scope is None or _has_scope(claims, scope)):
+            return str(claims["sub"])          # sub == user_id
+        return None
+    key = request.headers.get("x-api-key") or request.headers.get("X-API-KEY")
+    return await resolve_agent_key(key)        # unchanged legacy path
 
 _RESOLVE_CACHE_TTL = 300  # seconds
 _resolve_cache: dict[str, tuple[str, float]] = {}  # agent_key -> (user_id, expires)

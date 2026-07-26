@@ -3,6 +3,9 @@ uvicorn[standard]==0.30.1
 asyncpg==0.29.0
 httpx==0.27.0
 python-multipart==0.0.9
+# OAuth 2.0 resource server — validate account.osmike.com RS256 Bearer JWTs
+# locally against the published JWKS (docs/implement_oauth.md).
+pyjwt[crypto]==2.9.0
 # Speech→text (docs/SPEECH-PIPELINE.md). CPU int8 via CTranslate2 — pulls
 # ctranslate2 + onnxruntime (Silero VAD) + av; NO torch. Runs only in the
 # scripts/transcribe.py subprocess, never in the API process.

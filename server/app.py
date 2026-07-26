@@ -21,7 +21,7 @@ from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, Response, StreamingResponse
 
 from . import config, db, encode, transcribe, enrich
-from .identity import resolve_agent_key
+from .identity import authenticate
 from .tickets import mint_ticket, verify_callback_signature
 
 logging.basicConfig(level=logging.INFO,
@@ -83,9 +83,9 @@ def _parse_ts(v):
         return None
 
 
-async def _auth(request: Request) -> str | None:
-    key = request.headers.get("x-api-key") or request.headers.get("X-API-KEY")
-    return await resolve_agent_key(key)
+async def _auth(request: Request, scope: str | None = None) -> str | None:
+    # Dual-auth: OAuth Bearer JWT (via JWKS) preferred, legacy X-API-KEY fallback.
+    return await authenticate(request, scope)
 
 
 async def _user_usage(user_id: str) -> int:
@@ -141,7 +141,7 @@ async def health():
 # ---------------------------------------------------------------------------
 @app.post("/api/videos")
 async def create_video(request: Request):
-    user_id = await _auth(request)
+    user_id = await _auth(request, scope="video.write")
     if not user_id:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -398,7 +398,7 @@ async def get_public_video(video_id: str):
 # ---------------------------------------------------------------------------
 @app.post("/api/videos/{video_id}/visibility")
 async def set_visibility(video_id: str, request: Request):
-    user_id = await _auth(request)
+    user_id = await _auth(request, scope="video.write")
     if not user_id:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
