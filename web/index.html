@@ -61,6 +61,18 @@
   main{max-width:1600px;margin:0 auto;padding:22px 24px 80px}
   .hide{display:none!important}
 
+  /* ---------- left rail (P4) — YouTube-style mini guide ---------- */
+  #rail{position:fixed;left:0;top:var(--hdr-h);bottom:0;width:78px;z-index:30;
+    display:flex;flex-direction:column;gap:4px;padding:10px 6px;background:var(--bg);
+    border-right:1px solid var(--line)}
+  #rail a{display:flex;flex-direction:column;align-items:center;gap:5px;padding:12px 4px;
+    border-radius:12px;color:var(--muted);font-size:10.5px;font-weight:600}
+  #rail a .ic{font-size:20px;line-height:1}
+  #rail a:hover{background:var(--elev);color:var(--ink)}
+  #rail a.on{background:var(--elev);color:var(--ink)}
+  @media(min-width:1000px){ main{padding-left:94px} }
+  @media(max-width:999px){ #rail{display:none} }
+
   /* ---------- video grid ---------- */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:20px 16px}
   .card{cursor:pointer;display:flex;flex-direction:column}
@@ -181,6 +193,10 @@
   .chsub{color:var(--muted);font-size:14px;font-weight:600}
   .chbio{color:var(--ink);font-size:14px;margin-top:10px;max-width:70ch;white-space:pre-wrap;line-height:1.5}
   .chact{display:flex;gap:10px;flex-wrap:wrap}
+  .subbtn{background:var(--ink);color:#111;border-radius:20px;padding:9px 17px;font-weight:700;font-size:13.5px;white-space:nowrap}
+  .subbtn.on{background:var(--elev);color:var(--muted);border:1px solid var(--line)}
+  .wchanrow{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:6px 0 14px}
+  .wchanrow .wchan{margin:0}
   @media(max-width:640px){ .chav{width:72px;height:72px} .chav.letter{font-size:30px} h1.chname{font-size:21px} }
   .drop{border:1.5px dashed var(--line);border-radius:16px;padding:40px 20px;text-align:center;color:var(--muted);
     background:var(--bg2);cursor:pointer;transition:.15s}
@@ -222,11 +238,18 @@
     </form>
   </div>
   <div class="hactions">
+    <button class="btn ghost hsub hide" onclick="go('subs')" title="Subscriptions">📺<span class="w"> Subscriptions</span></button>
     <button class="btn ghost" onclick="go('playlists')" title="Playlists">☰<span class="w"> Playlists</span></button>
     <button class="btn primary" onclick="openUpload()">↑ <span class="w">Upload</span></button>
     <span id="account"></span>
   </div>
 </header>
+
+<nav id="rail">
+  <a data-rail="home" onclick="go('')"><span class="ic">🏠</span>Home</a>
+  <a data-rail="subs" onclick="go('subs')"><span class="ic">📺</span>Subs</a>
+  <a data-rail="playlists" onclick="go('playlists')"><span class="ic">☰</span>Library</a>
+</nav>
 
 <main id="view"></main>
 
@@ -262,6 +285,7 @@ function ccLang(v){ return (v.transcript_status==='ready' && v.spoken_language) 
 function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('on'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('on'),2200); }
 function renderAccount(){
   const a=$('#account'); if(!a) return;
+  document.querySelectorAll('.hsub').forEach(b=>b.classList.toggle('hide', !TOKEN));
   if(TOKEN){
     const initial=(MYCH&&(MYCH.display_name||MYCH.handle))?(MYCH.display_name||MYCH.handle)[0].toUpperCase()
       :((USER&&USER.email)?USER.email[0].toUpperCase():'M');
@@ -287,15 +311,22 @@ function parseHash(){
   if(h.startsWith('playlist=')) return {v:'playlist', id:decodeURIComponent(h.slice(9))};
   if(h.startsWith('channel=')) return {v:'channel', handle:decodeURIComponent(h.slice(8))};
   if(h==='playlists') return {v:'playlists'};
+  if(h==='subs') return {v:'subs'};
   return {v:'home'};
+}
+function markRail(v){
+  const map={home:'home',subs:'subs',playlists:'playlists',playlist:'playlists'};
+  document.querySelectorAll('#rail a').forEach(a=>a.classList.toggle('on', a.dataset.rail===map[v]));
 }
 async function route(){
   const r = parseHash();
+  markRail(r.v);
   if(r.v==='watch') return renderWatch(r.id);
   if(r.v==='search'){ $('#q').value=r.q; return renderSearch(r.q); }
   if(r.v==='playlists') return renderPlaylists();
   if(r.v==='playlist') return renderPlaylistDetail(r.id);
   if(r.v==='channel') return renderChannel(r.handle);
+  if(r.v==='subs') return renderSubs();
   return renderHome();
 }
 window.addEventListener('hashchange', route);
@@ -445,9 +476,12 @@ function renderWatchInfo(v){
   const info=$('#winfo');
   const likeBtn = `<button class="pill ${v.liked?'on':''}" id="likebtn" onclick="toggleLike('${v.id}')">👍 <span id="likecount">${fmtCount(v.likes||0)}</span></button>`;
   const ch=v.channel;
-  const chRow = ch ? `<div class="wchan" onclick="go('channel=${esc(ch.handle)}')">
-      ${avatarEl(ch,'av')}<div><div class="wcname">${esc(ch.display_name)}</div>
-      <div class="wchandle">@${esc(ch.handle)}</div></div></div>` : '';
+  const subCount = ch&&ch.subscriber_count!=null ? `${fmtCount(ch.subscriber_count)} subscriber${ch.subscriber_count===1?'':'s'}` : '';
+  const chRow = ch ? `<div class="wchanrow">
+      <div class="wchan" onclick="go('channel=${esc(ch.handle)}')">
+        ${avatarEl(ch,'av')}<div><div class="wcname">${esc(ch.display_name)}</div>
+        <div class="wchandle">@${esc(ch.handle)}${subCount?' · '+subCount:''}</div></div></div>
+      ${subBtn(ch,'wsub-btn')}</div>` : '';
   info.innerHTML = `<h1 class="wt">${esc(titleOf(v))}</h1>
     ${chRow}
     <div class="wactions">
@@ -502,6 +536,39 @@ async function share(id, isPublic){
   copyLink(id);
 }
 
+/* ---------------- subscriptions (P4) ---------------- */
+async function renderSubs(){
+  if(!TOKEN){ view.innerHTML=`<div class="empty" style="margin-top:8vh"><div style="font-size:40px">📺</div>
+    <p style="color:var(--muted);margin:12px 0 16px">Sign in to see the latest from channels you follow.</p>
+    <button class="btn primary" onclick="startOAuth()" style="display:inline-flex">Sign in with MikeOS</button></div>`; return; }
+  view.innerHTML=`<div class="sectitle">Latest from your subscriptions</div><div id="grid" class="grid"></div>`;
+  let vids=[];
+  try{ const r=await afetch('/api/feed/subscriptions'); vids=((await r.json()).videos)||[]; }catch(e){}
+  const g=$('#grid'); if(!g) return;
+  g.innerHTML = vids.length ? vids.map(videoCard).join('')
+    : `<div class="empty" style="grid-column:1/-1">No videos yet. Subscribe to a creator from their channel to see their public uploads here.</div>`;
+}
+// Subscribe/unsubscribe toggle; used on the channel + watch pages.
+async function toggleSub(handle, btnId){
+  if(!TOKEN){ startOAuth(); return; }
+  const btn=document.getElementById(btnId); if(!btn) return;
+  const on=btn.classList.contains('on');
+  try{
+    const r=await afetch('/api/channels/'+encodeURIComponent(handle)+'/subscribe',{method:on?'DELETE':'POST'});
+    const d=await r.json(); if(!r.ok){ toast(d.error||'Could not update'); return; }
+    btn.classList.toggle('on', d.subscribed);
+    btn.textContent = d.subscribed ? 'Subscribed ✓' : 'Subscribe';
+    const c=document.getElementById(btnId+'-count'); if(c) c.textContent=fmtCount(d.subscriber_count)+(d.subscriber_count===1?' subscriber':' subscribers');
+    toast(d.subscribed?'Subscribed':'Unsubscribed');
+  }catch(e){ toast('Network error'); }
+}
+function subBtn(ch, id){
+  // ch: {handle, subscribed, is_me}. No button for your own channel or when handle missing.
+  if(!ch || !ch.handle || ch.is_me) return '';
+  const on = ch.subscribed;
+  return `<button class="subbtn ${on?'on':''}" id="${id}" onclick="toggleSub('${esc(ch.handle)}','${id}')">${on?'Subscribed ✓':'Subscribe'}</button>`;
+}
+
 /* ---------------- channel (P3) ---------------- */
 let MYCH = null;   // {handle,...} of the signed-in user's own channel
 async function loadMyChannel(){
@@ -518,14 +585,19 @@ async function renderChannel(handle){
     <p style="color:var(--muted);margin-top:8px">This creator handle doesn't exist.</p>
     <button class="btn ghost" onclick="go('')" style="display:inline-flex;margin-top:6px">Go home</button></div>`; return; }
   const c=data.channel, s=data.stats||{};
-  const stat=`${s.video_count||0} video${s.video_count===1?'':'s'} · ${fmtCount(s.total_views||0)} view${s.total_views===1?'':'s'}`;
+  const subs=`${fmtCount(s.subscriber_count||0)} subscriber${s.subscriber_count===1?'':'s'}`;
+  const stat=`@${esc(c.handle)} · <span id="chsub-btn-count">${subs}</span> · ${s.video_count||0} video${s.video_count===1?'':'s'} · ${fmtCount(s.total_views||0)} view${s.total_views===1?'':'s'}`;
+  const chObj={handle:c.handle, subscribed:data.subscribed, is_me:data.is_me};
+  const action = data.is_me
+    ? `<div class="chact"><button class="btn ghost" onclick="editChannel()">Edit channel</button>
+        <button class="btn ghost" onclick="signOut()">Sign out</button></div>`
+    : `<div class="chact">${subBtn(chObj,'chsub-btn')}</div>`;
   $('#chhead').innerHTML=`<div class="chbanner">
     ${avatarEl(c,'chav')}
     <div class="chinfo"><h1 class="chname">${esc(c.display_name)}</h1>
-      <div class="chsub">@${esc(c.handle)} · ${stat}</div>
+      <div class="chsub">${stat}</div>
       ${c.bio?`<div class="chbio">${esc(c.bio)}</div>`:''}</div>
-    ${data.is_me?`<div class="chact"><button class="btn ghost" onclick="editChannel()">Edit channel</button>
-      <button class="btn ghost" onclick="signOut()">Sign out</button></div>`:''}
+    ${action}
   </div>`;
   const g=$('#grid');
   g.innerHTML = data.videos.length ? data.videos.map(videoCard).join('')

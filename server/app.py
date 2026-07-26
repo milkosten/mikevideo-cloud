@@ -235,37 +235,10 @@ async def oauth_token(request: Request):
 @app.get("/api/public/videos")
 async def public_feed():
     rows = await db.pool().fetch(
-        "SELECT v.id, v.user_id, v.filename, v.ai_title, v.duration_sec,"
-        " v.display_width, v.display_height, v.orientation, v.spoken_language,"
-        " v.transcript_status, v.view_count, v.created_at, v.published_at,"
-        " c.handle, c.display_name AS channel_name, c.avatar_url"
-        " FROM mikevideo.videos v"
-        " LEFT JOIN mikevideo.channels c ON c.user_id=v.user_id"
+        _CARD_SELECT +
         " WHERE v.visibility='public' AND v.status='ready'"
         " ORDER BY v.published_at DESC NULLS LAST, v.created_at DESC LIMIT 200")
-    out = []
-    for r in rows:
-        vid = str(r["id"])
-        out.append({
-            "id": vid,
-            "status": "ready",
-            "ai_title": r["ai_title"],
-            "filename": r["filename"],
-            "duration_sec": r["duration_sec"],
-            "display_width": r["display_width"],
-            "display_height": r["display_height"],
-            "orientation": r["orientation"],
-            "spoken_language": r["spoken_language"],
-            "transcript_status": r["transcript_status"],
-            "visibility": "public",
-            "view_count": r["view_count"],
-            "thumb_url": _thumb_url(r["user_id"], vid),
-            "channel": _channel_brief(r["handle"], r["channel_name"],
-                                      r["avatar_url"], r["user_id"]),
-            "created_at": _iso(r["created_at"]),
-            "published_at": _iso(r["published_at"]),
-        })
-    return {"videos": out}
+    return {"videos": [_public_card(r) for r in rows]}
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +483,11 @@ async def get_video(video_id: str, request: Request):
         return JSONResponse({"error": "not found"}, status_code=404)
     payload = _detail_payload(r, is_owner=True)
     payload["channel"] = await _channel_for(r["user_id"])
+    payload["channel"].update({
+        "subscriber_count": await _sub_count(r["user_id"]),
+        "subscribed": await _is_subscribed(user_id, r["user_id"]),
+        "is_me": user_id == r["user_id"],
+    })
     payload.update(await _engagement(vid, user_id))
     return payload
 
@@ -547,6 +525,11 @@ async def get_public_video(video_id: str, request: Request):
     payload = _detail_payload(r, is_owner=False)
     payload["channel"] = await _channel_for(r["user_id"])
     viewer = await authenticate(request)          # optional — personalises like/progress
+    payload["channel"].update({
+        "subscriber_count": await _sub_count(r["user_id"]),
+        "subscribed": await _is_subscribed(viewer, r["user_id"]),
+        "is_me": viewer == r["user_id"],
+    })
     payload.update(await _engagement(vid, viewer))
     return payload
 
@@ -586,12 +569,60 @@ async def set_visibility(video_id: str, request: Request):
 # Channels (P3) — public creator profiles at @handle
 # ---------------------------------------------------------------------------
 async def _channel_stats(user_id: str) -> dict:
-    """Public-facing counts for a channel: public ready videos + their views."""
+    """Public-facing counts for a channel: public ready videos + views + subs."""
     row = await db.pool().fetchrow(
         "SELECT count(*) AS n, COALESCE(SUM(view_count),0) AS views"
         " FROM mikevideo.videos WHERE user_id=$1 AND visibility='public'"
         " AND status='ready'", user_id)
-    return {"video_count": int(row["n"] or 0), "total_views": int(row["views"] or 0)}
+    return {"video_count": int(row["n"] or 0), "total_views": int(row["views"] or 0),
+            "subscriber_count": await _sub_count(user_id)}
+
+
+# ---------------------------------------------------------------------------
+# Subscriptions (P4) — a viewer follows a creator (both are user_ids).
+# ---------------------------------------------------------------------------
+async def _sub_count(channel_user_id: str) -> int:
+    return int(await db.pool().fetchval(
+        "SELECT count(*) FROM mikevideo.subscriptions WHERE channel_user_id=$1",
+        channel_user_id) or 0)
+
+
+async def _is_subscribed(viewer_user_id, channel_user_id: str) -> bool:
+    if not viewer_user_id:
+        return False
+    return bool(await db.pool().fetchval(
+        "SELECT 1 FROM mikevideo.subscriptions"
+        " WHERE subscriber_user_id=$1 AND channel_user_id=$2",
+        viewer_user_id, channel_user_id))
+
+
+def _public_card(r) -> dict:
+    """A public video card from a row that joined videos + channels (columns:
+    id, user_id, filename, ai_title, duration_sec, display_width, display_height,
+    orientation, spoken_language, transcript_status, view_count, created_at,
+    published_at, handle, channel_name, avatar_url)."""
+    vid = str(r["id"])
+    return {
+        "id": vid, "status": "ready", "ai_title": r["ai_title"],
+        "filename": r["filename"], "duration_sec": r["duration_sec"],
+        "display_width": r["display_width"], "display_height": r["display_height"],
+        "orientation": r["orientation"], "spoken_language": r["spoken_language"],
+        "transcript_status": r["transcript_status"], "visibility": "public",
+        "view_count": r["view_count"], "thumb_url": _thumb_url(r["user_id"], vid),
+        "channel": _channel_brief(r["handle"], r["channel_name"], r["avatar_url"], r["user_id"]),
+        "created_at": _iso(r["created_at"]), "published_at": _iso(r["published_at"]),
+    }
+
+
+# Shared column list + join for the public-video card queries (feed / subs feed).
+_CARD_SELECT = (
+    "SELECT v.id, v.user_id, v.filename, v.ai_title, v.duration_sec,"
+    " v.display_width, v.display_height, v.orientation, v.spoken_language,"
+    " v.transcript_status, v.view_count, v.created_at, v.published_at,"
+    " c.handle, c.display_name AS channel_name, c.avatar_url"
+    " FROM mikevideo.videos v"
+    " LEFT JOIN mikevideo.channels c ON c.user_id=v.user_id"
+)
 
 
 def _channel_full(row) -> dict:
@@ -698,7 +729,62 @@ async def public_channel(handle: str, request: Request):
     out.pop("user_id", None)                       # don't leak the raw user_id
     viewer = await authenticate(request)           # optional — flag "this is me"
     return {"channel": out, "is_me": viewer == owner,
+            "subscribed": await _is_subscribed(viewer, owner),
             "stats": await _channel_stats(owner), "videos": videos}
+
+
+# ---------------------------------------------------------------------------
+# Subscribe / unsubscribe to a channel (P4). Both keyed on user_id.
+# ---------------------------------------------------------------------------
+async def _channel_owner(handle: str):
+    return await db.pool().fetchval(
+        "SELECT user_id FROM mikevideo.channels WHERE lower(handle)=lower($1)",
+        handle.lstrip("@"))
+
+
+@app.post("/api/channels/{handle}/subscribe")
+async def subscribe(handle: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    owner = await _channel_owner(handle)
+    if not owner:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if owner == user_id:
+        return JSONResponse({"error": "cannot subscribe to yourself"}, status_code=400)
+    await db.pool().execute(
+        "INSERT INTO mikevideo.subscriptions(subscriber_user_id, channel_user_id)"
+        " VALUES($1,$2) ON CONFLICT DO NOTHING", user_id, owner)
+    return {"subscribed": True, "subscriber_count": await _sub_count(owner)}
+
+
+@app.delete("/api/channels/{handle}/subscribe")
+async def unsubscribe(handle: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    owner = await _channel_owner(handle)
+    if not owner:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    await db.pool().execute(
+        "DELETE FROM mikevideo.subscriptions"
+        " WHERE subscriber_user_id=$1 AND channel_user_id=$2", user_id, owner)
+    return {"subscribed": False, "subscriber_count": await _sub_count(owner)}
+
+
+# GET /api/feed/subscriptions — recent public videos from channels you follow.
+@app.get("/api/feed/subscriptions")
+async def subscriptions_feed(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    rows = await db.pool().fetch(
+        _CARD_SELECT +
+        " JOIN mikevideo.subscriptions s ON s.channel_user_id=v.user_id"
+        "   AND s.subscriber_user_id=$1"
+        " WHERE v.visibility='public' AND v.status='ready'"
+        " ORDER BY v.published_at DESC NULLS LAST, v.created_at DESC LIMIT 200", user_id)
+    return {"videos": [_public_card(r) for r in rows]}
 
 
 # ---------------------------------------------------------------------------
