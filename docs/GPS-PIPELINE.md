@@ -38,18 +38,31 @@ the precise route. Never leak exact coordinates on a public endpoint.
 2. **~~Location/naming~~ RESOLVED** — `/sdcard/Android/data/com.mikeos.camera/files/Movies/
    MikeCamera/<base>.gps.json` (extension **replaced**, not appended: `MIKE_x.mp4` →
    `MIKE_x.gps.json`).
-3. **NEW WRINKLE — scoped-storage access.** The sidecar lives in the **camera app's private
-   external dir** (`Android/data/com.mikeos.camera/…`); the video is MediaStore-visible but the
-   JSON is not. Under scoped storage MikeVideo **cannot** read another app's `Android/data`.
-   Decide the production ingest broker: (a) **camera** writes the sidecar to a shared spot /
-   uploads it itself; (b) **daemon** brokers the track (it's already the GPS authority —
-   `source: MikeOS-daemon`) and MikeVideo requests it per video/time-range; (c) MikeVideo takes
-   `MANAGE_EXTERNAL_STORAGE` (heavy). Leaning (b)/(a). Backfill of existing tracks can be done
-   now via adb pull → cloud upload (no permission issue).
-4. **Valhalla region coverage** — confirm the extract loaded on Box B (`:8002`) covers the
-   footage region (Côte d'Azur / France). If not, load the extract onto the RAID6.
-5. **Reverse geocoder** — reuse a MikeOS geocoder (places/basemap) if present, else stand up
-   **Nominatim** on Box B (regional DB fits the RAID6).
+3. **~~Scoped-storage broker~~ DECIDED → the DAEMON** (coordinator reply
+   `mikeos-infrastructure/support/to-mikevideo-response-gps-issue.md`). The daemon runs as
+   **root** on the ROM, so scoped storage doesn't apply to it — it reads the camera's
+   `Android/data/…/<base>.gps.json` directly. Contract the **daemon team** is adding:
+   `POST /api/videos/gps` (camera→daemon on finalize) + `GET /api/videos/{id}/gps` /
+   `?uri=` / `?from=&to=` (MikeVideo pulls over the loopback it already uses) + a **root
+   backfill sweep** across the whole fleet's sidecars. **MikeVideo's job:** pull from the daemon
+   and forward to the G1 cloud endpoint — no storage permission, works while unpaired.
+   *Blocked on: the daemon endpoint shipping.* Pre-convention clips (`2026-07-22-…`) = `gps:none`
+   (GPS provider was dead before 2026-07-27; nothing to recover).
+4. **~~Valhalla coverage~~ CONFIRMED** — full **planet loaded** (covers Côte d'Azur), but the
+   **routing tiles are still building** (checked 2026-07-27: graph-edge/sort phase, `/status`→000).
+   **Wait** for the build; then `/route` + `/trace_route` (map-match) on Box B `:8002` work
+   worldwide. **Reverse geocoder = the SHARED Nominatim** on the OSM box:
+   `https://osm.osmike.com/nominatim/reverse?lat=&lon=&format=json` (`Bearer OSM_TOKEN`,
+   reachable — returns 401 without the token). **Do NOT** stand up a second geocoder.
+   *Split:* routing/map-match = Valhalla (media box `:8002`); place names = Nominatim (osm box).
+5. **~~RAID6 carve-out~~ APPROVED** — `/data/mikevideo-geo/` on Box B is the intended use of the
+   RAID6 (the "nothing on /data" line is **test-bench-scoped** only). Constraints: isolated dir;
+   never touch `valhalla`/`mikeos-chat-media`/`deploy-*`; no reboots; gentle during RAID6 resync;
+   cap CPU so G2 doesn't starve Valhalla's tile build.
+
+*Still needed before G2 build starts:* (a) Valhalla tile build finishes, (b) `OSM_TOKEN` for
+Nominatim, (c) daemon `/api/videos/gps` endpoint for the live app path (G1 cloud + backfill
+already work without it).
 
 ---
 
