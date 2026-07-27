@@ -933,6 +933,39 @@ async def shorts_feed(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/explore[?tag=] — Trending / Explore (P11): popular public videos +
+# category chips built from AI tags. No auth (public discovery).
+# ---------------------------------------------------------------------------
+_EXPLORE_ORDER = (
+    " ORDER BY (COALESCE(v.view_count,0)"
+    "   + (SELECT count(*) FROM mikevideo.likes l WHERE l.video_id=v.id) * 5) DESC,"
+    " v.published_at DESC NULLS LAST, v.created_at DESC LIMIT 60")
+
+
+@app.get("/api/explore")
+async def explore(request: Request):
+    tag = (request.query_params.get("tag") or "").strip().lower() or None
+    # Category chips: the most common AI tags across public videos.
+    tagrows = await db.pool().fetch(
+        "SELECT lower(t) AS tag, count(*) AS n"
+        " FROM mikevideo.videos v, unnest(COALESCE(v.ai_tags, ARRAY[]::text[])) t"
+        " WHERE v.visibility='public' AND v.status='ready'"
+        " GROUP BY lower(t) ORDER BY n DESC, tag ASC LIMIT 30")
+    tags = [r["tag"] for r in tagrows]
+    if tag:
+        rows = await db.pool().fetch(
+            _CARD_SELECT +
+            " WHERE v.visibility='public' AND v.status='ready'"
+            "   AND EXISTS(SELECT 1 FROM unnest(COALESCE(v.ai_tags, ARRAY[]::text[])) t"
+            "     WHERE lower(t)=$1)" + _EXPLORE_ORDER, tag)
+    else:
+        rows = await db.pool().fetch(
+            _CARD_SELECT +
+            " WHERE v.visibility='public' AND v.status='ready'" + _EXPLORE_ORDER)
+    return {"tag": tag, "tags": tags, "videos": [_public_card(r) for r in rows]}
+
+
+# ---------------------------------------------------------------------------
 # Notifications (P8) — a per-user inbox. Fanned out on new uploads, comments,
 # and new subscribers. `payload` is a jsonb dict (auto-encoded by the pool).
 # ---------------------------------------------------------------------------

@@ -125,6 +125,10 @@
   .empty b{color:var(--ink)}
   .filters{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap}
   .chip{background:var(--elev);border:1px solid var(--line);border-radius:9px;padding:7px 13px;font-size:13px;font-weight:600;color:var(--ink)}
+  .tagchips{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:22px}
+  .tchip{background:var(--elev);border:1px solid var(--line);border-radius:20px;padding:8px 15px;font-size:13px;font-weight:600;color:var(--ink);cursor:pointer;white-space:nowrap;text-transform:capitalize}
+  .tchip:hover{background:var(--hover)}
+  .tchip.on{background:var(--grad);color:#fff;border-color:transparent}
   .chip.on{background:var(--ink);color:#111;border-color:var(--ink)}
 
   /* ---------- watch ---------- */
@@ -330,6 +334,7 @@
   </div>
   <div class="hactions">
     <button class="btn ghost" onclick="go('shorts')" title="Shorts">⚡<span class="w"> Shorts</span></button>
+    <button class="btn ghost" onclick="go('explore')" title="Explore">🧭<span class="w"> Explore</span></button>
     <button class="btn ghost hsub hide" onclick="go('subs')" title="Subscriptions">📺<span class="w"> Subscriptions</span></button>
     <button class="btn ghost" onclick="go('playlists')" title="Playlists">☰<span class="w"> Playlists</span></button>
     <button class="btn primary" onclick="openUpload()">↑ <span class="w">Upload</span></button>
@@ -341,6 +346,7 @@
 <nav id="rail">
   <a data-rail="home" onclick="go('')"><span class="ic">🏠</span>Home</a>
   <a data-rail="shorts" onclick="go('shorts')"><span class="ic">⚡</span>Shorts</a>
+  <a data-rail="explore" onclick="go('explore')"><span class="ic">🧭</span>Explore</a>
   <a data-rail="subs" onclick="go('subs')"><span class="ic">📺</span>Subs</a>
   <a data-rail="playlists" onclick="go('playlists')"><span class="ic">☰</span>Library</a>
 </nav>
@@ -460,10 +466,12 @@ function parseHash(){
   if(h==='playlists') return {v:'playlists'};
   if(h==='subs') return {v:'subs'};
   if(h==='shorts') return {v:'shorts'};
+  if(h==='explore') return {v:'explore'};
+  if(h.startsWith('explore=')) return {v:'explore', tag:decodeURIComponent(h.slice(8))};
   return {v:'home'};
 }
 function markRail(v){
-  const map={home:'home',subs:'subs',shorts:'shorts',playlists:'playlists',playlist:'playlists'};
+  const map={home:'home',subs:'subs',shorts:'shorts',explore:'explore',playlists:'playlists',playlist:'playlists'};
   document.querySelectorAll('#rail a').forEach(a=>a.classList.toggle('on', a.dataset.rail===map[v]));
 }
 async function route(){
@@ -479,6 +487,7 @@ async function route(){
   if(r.v==='channel') return renderChannel(r.handle);
   if(r.v==='subs') return renderSubs();
   if(r.v==='shorts') return renderShorts();
+  if(r.v==='explore') return renderExplore(r.tag);
   return renderHome();
 }
 window.addEventListener('hashchange', route);
@@ -963,6 +972,21 @@ async function shortLike(id, btn){
 function shortMute(btn){
   const v=btn.closest('.short').querySelector('video'); if(!v) return;
   v.muted=!v.muted; btn.querySelector('[data-m]').textContent=v.muted?'🔇':'🔊';
+}
+
+/* ---------------- explore (P11) ---------------- */
+async function renderExplore(tag){
+  view.innerHTML = `<div class="sectitle">${tag?('🧭 #'+esc(tag)):'🧭 Explore — trending on MikeVideo'}</div>
+    <div class="tagchips" id="tagchips"></div>
+    <div id="grid" class="grid"></div>`;
+  let data={tags:[],videos:[]};
+  try{ const r=await fetch('/api/explore'+(tag?('?tag='+encodeURIComponent(tag)):''),{headers:hdr()}); if(r.ok) data=await r.json(); }catch(e){}
+  const chips=$('#tagchips');
+  if(chips){ chips.innerHTML = `<a class="tchip ${!tag?'on':''}" onclick="go('explore')">🔥 Trending</a>`
+    + (data.tags||[]).map(t=>`<a class="tchip ${tag===t?'on':''}" onclick="go('explore=${encodeURIComponent(t)}')">${esc(t)}</a>`).join(''); }
+  const g=$('#grid'); if(!g) return;
+  g.innerHTML = (data.videos&&data.videos.length)? data.videos.map(videoCard).join('')
+    : `<div class="empty" style="grid-column:1/-1">${tag?'No public videos tagged “'+esc(tag)+'” yet.':'Nothing to explore yet — make a video public.'}</div>`;
 }
 
 /* ---------------- channel (P3) ---------------- */
