@@ -53,7 +53,25 @@ the precise route. Never leak exact coordinates on a public endpoint.
 
 ---
 
-## Phase G1 — Ingest & foundational storage (Box A + app)
+## Phase G1 — Ingest & foundational storage — ✅ DONE (2026-07-27)
+*Cloud ingest + storage + stats + privacy shipped; 5 real tracks backfilled.*
+
+**Shipped & verified:** migration `013_gps` (has_gps/gps_status/gps jsonb/point_count/
+start+centroid lat-lng/bbox/distance_m/moving_seconds/avg+max_speed + partial geo index).
+`POST /api/videos/{id}/gps` (owner) validates `mikeos.video.gpstrack/1`, normalizes samples
+(lat/lon/alt/spd/brg/acc, downsamples >4000), derives haversine distance/bbox/centroid/speed →
+stored **in the DB (never under keyless /media)**. `GET /api/videos/{id}/gps` — **owner: full
+precise track; public video: coarse ~1 km centroid + distance only, no samples; private→404**
+(all three proven live). `has_gps`+`distance_m` added to video detail. **Backfill:** pulled the
+5 MikeCamera sidecars off the Samsung, matched by filename, ingested — real Côte d'Azur data
+(two drives 220 m / 460 m @ ~49 km/h, three stationary shots). Local GPS copies wiped after.
+
+**Deferred (needs a cross-repo decision — see open item #3):** the *automatic app-side* ingest.
+Under scoped storage MikeVideo cannot read the camera's private `Android/data` folder, so the
+production auto-path needs the **camera or daemon** to expose the sidecar. The backfill proves
+the cloud pipeline; the app hook lands once the broker is chosen.
+
+### Original G1 design (for reference)
 *Get the data flowing with zero external dependencies.*
 
 - **App (sync):** for each clip, resolve its sibling `<base>.gps.json` via MediaStore (same
