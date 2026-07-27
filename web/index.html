@@ -56,6 +56,23 @@
   .keydot .ind{position:absolute;right:-1px;bottom:-1px;width:10px;height:10px;border-radius:50%;
     background:#5a5560;border:2px solid var(--bg)}
   .keydot.on .ind{background:var(--ok)}
+  /* ---------- notifications (P8) ---------- */
+  .bell{position:relative;width:38px;height:38px;border-radius:50%;display:grid;place-items:center;font-size:18px;background:transparent}
+  .bell:hover{background:var(--elev)}
+  .nbadge{position:absolute;top:2px;right:2px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--rose);color:#fff;font-size:10px;font-weight:800;display:grid;place-items:center;line-height:1}
+  .notifdd{position:fixed;z-index:70;width:min(380px,92vw);max-height:70vh;overflow:auto;background:var(--elev);border:1px solid var(--line);border-radius:14px;box-shadow:0 30px 70px -24px #000}
+  .ndhead{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);font-weight:700;position:sticky;top:0;background:var(--elev)}
+  .ndhead button{color:var(--peri);font-size:12.5px;font-weight:600}
+  .ndempty{padding:26px 18px;color:var(--muted);font-size:13.5px;text-align:center;line-height:1.5}
+  .ndrow{display:flex;gap:12px;padding:12px 16px;cursor:pointer;border-bottom:1px solid var(--line)}
+  .ndrow:hover{background:var(--hover)}
+  .ndrow.unread{background:rgba(124,124,255,.08)}
+  .ndt{width:80px;height:46px;border-radius:8px;overflow:hidden;background:#000;flex:none;display:grid;place-items:center}
+  .ndt img{width:100%;height:100%;object-fit:cover}
+  .ndt .nph{font-size:18px}
+  .ndmeta{min-width:0}
+  .ndtext{font-size:13px;line-height:1.4}
+  .ndago{color:var(--muted);font-size:11.5px;margin-top:3px}
 
   /* ---------- layout ---------- */
   main{max-width:1600px;margin:0 auto;padding:22px 24px 80px}
@@ -275,6 +292,7 @@
     <button class="btn ghost hsub hide" onclick="go('subs')" title="Subscriptions">📺<span class="w"> Subscriptions</span></button>
     <button class="btn ghost" onclick="go('playlists')" title="Playlists">☰<span class="w"> Playlists</span></button>
     <button class="btn primary" onclick="openUpload()">↑ <span class="w">Upload</span></button>
+    <span id="notif"></span>
     <span id="account"></span>
   </div>
 </header>
@@ -320,6 +338,7 @@ function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('on'); 
 function renderAccount(){
   const a=$('#account'); if(!a) return;
   document.querySelectorAll('.hsub').forEach(b=>b.classList.toggle('hide', !TOKEN));
+  renderNotif();
   if(TOKEN){
     const initial=(MYCH&&(MYCH.display_name||MYCH.handle))?(MYCH.display_name||MYCH.handle)[0].toUpperCase()
       :((USER&&USER.email)?USER.email[0].toUpperCase():'M');
@@ -332,7 +351,59 @@ async function openMyChannel(){
   if(!MYCH) await loadMyChannel();
   if(MYCH&&MYCH.handle) go('channel='+MYCH.handle); else startOAuth();
 }
-function signOut(){ TOKEN=''; REFRESH=''; USER=null; MYCH=null;
+
+/* ---------------- notifications (P8) ---------------- */
+let NOTIFS=[];
+function renderNotif(){
+  const n=$('#notif'); if(!n) return;
+  if(!TOKEN){ n.innerHTML=''; return; }
+  const unread=NOTIFS.filter(x=>!x.is_read).length;
+  n.innerHTML=`<button class="bell" onclick="toggleNotif(event)" title="Notifications">🔔${unread?`<span class="nbadge">${unread>9?'9+':unread}</span>`:''}</button>`;
+}
+async function loadNotifications(){
+  if(!TOKEN){ NOTIFS=[]; renderNotif(); return; }
+  try{ const r=await afetch('/api/notifications'); if(r.ok){ NOTIFS=((await r.json()).notifications)||[]; renderNotif(); } }catch(e){}
+}
+function notifText(nt){
+  const p=nt.payload||{};
+  if(nt.kind==='new_video') return {t:`<b>${esc((p.channel&&p.channel.display_name)||'A creator')}</b> uploaded <b>${esc(p.title||'a video')}</b>`, go:p.video_id?`watch=${p.video_id}`:''};
+  if(nt.kind==='comment') return {t:`<b>${esc((p.actor&&p.actor.display_name)||'Someone')}</b> commented: ${esc((p.snippet||'').slice(0,70))}`, go:p.video_id?`watch=${p.video_id}`:''};
+  if(nt.kind==='subscriber') return {t:`<b>${esc((p.actor&&p.actor.display_name)||'Someone')}</b> subscribed to you`, go:(p.actor&&p.actor.handle)?`channel=${p.actor.handle}`:''};
+  return {t:'Notification', go:''};
+}
+function notifRow(nt){
+  const p=nt.payload||{}; const info=notifText(nt);
+  const thumb=p.thumb_url?`<img src="${p.thumb_url}" loading="lazy">`:'<span class="nph">🔔</span>';
+  return `<div class="ndrow ${nt.is_read?'':'unread'}" onclick="openNotif('${nt.id}','${info.go}')">
+      <div class="ndt">${thumb}</div>
+      <div class="ndmeta"><div class="ndtext">${info.t}</div><div class="ndago">${ago(nt.created_at)}</div></div></div>`;
+}
+function toggleNotif(e){
+  if(e) e.stopPropagation();
+  let dd=$('#notifdd');
+  if(dd){ dd.remove(); document.removeEventListener('click', closeNotifOutside); return; }
+  dd=document.createElement('div'); dd.id='notifdd'; dd.className='notifdd';
+  const anyUnread=NOTIFS.some(x=>!x.is_read);
+  dd.innerHTML=`<div class="ndhead"><span>Notifications</span>${anyUnread?`<button onclick="markAllRead(event)">Mark all read</button>`:''}</div>`
+    + (NOTIFS.length? NOTIFS.map(notifRow).join('') : `<div class="ndempty">Nothing yet — you'll hear when a channel you follow posts, or someone comments.</div>`);
+  document.body.appendChild(dd);
+  const b=$('.bell'); if(b){ const r=b.getBoundingClientRect(); dd.style.top=(r.bottom+8)+'px'; dd.style.right=Math.max(8,window.innerWidth-r.right)+'px'; }
+  setTimeout(()=>document.addEventListener('click', closeNotifOutside),0);
+}
+function closeNotifOutside(e){ const dd=$('#notifdd'); if(dd && !dd.contains(e.target) && !(e.target.closest&&e.target.closest('.bell'))){ dd.remove(); document.removeEventListener('click', closeNotifOutside); } }
+async function openNotif(id, target){
+  try{ afetch('/api/notifications/read',{method:'POST',headers:hdr({'Content-Type':'application/json'}),body:JSON.stringify({id})}); }catch(e){}
+  const dd=$('#notifdd'); if(dd)dd.remove(); document.removeEventListener('click', closeNotifOutside);
+  await loadNotifications();
+  if(target) go(target);
+}
+async function markAllRead(e){
+  if(e) e.stopPropagation();
+  try{ await afetch('/api/notifications/read',{method:'POST'}); }catch(e){}
+  const dd=$('#notifdd'); if(dd)dd.remove(); document.removeEventListener('click', closeNotifOutside);
+  await loadNotifications(); toast('Marked all read');
+}
+function signOut(){ TOKEN=''; REFRESH=''; USER=null; MYCH=null; NOTIFS=[];
   ['mikevideo_token','mikevideo_refresh','mikevideo_user'].forEach(k=>localStorage.removeItem(k));
   renderAccount(); go(''); route(); toast('Signed out'); }
 
@@ -883,7 +954,7 @@ async function handleCallback(){
       body:JSON.stringify({grant_type:'authorization_code',code,code_verifier:v,client_id:OAUTH.client,redirect_uri:OAUTH.redirect})});
     const d=await r.json();
     if(!r.ok || !d.access_token){ renderAccount(); route(); toast('Sign-in failed'); return; }
-    setTokens(d); toast('Signed in'); await loadMyChannel();
+    setTokens(d); toast('Signed in'); await loadMyChannel(); loadNotifications();
   }catch(e){ toast('Sign-in failed'); }
   renderAccount(); go(''); route();
 }
@@ -956,7 +1027,9 @@ async function uploadFile(file, box){
 
 /* ---------------- boot ---------------- */
 if(location.pathname==='/auth/callback'){ handleCallback(); }
-else { renderAccount(); route(); if(TOKEN) loadMyChannel().then(renderAccount); }
+else { renderAccount(); route(); if(TOKEN){ loadMyChannel().then(renderAccount); loadNotifications(); } }
+// Poll notifications every 45s so the bell stays current.
+setInterval(()=>{ if(TOKEN) loadNotifications(); }, 45000);
 // live-refresh the home grid so encoding→ready + new transcripts/titles surface
 setInterval(()=>{ if(parseHash().v==='home' && TOKEN){ loadLibrary().then(v=>{ if(_home==='mine' && parseHash().v==='home'){ const g=$('#grid'); if(g) g.innerHTML = v.length? v.map(videoCard).join('') : g.innerHTML; } }); } }, 9000);
 </script>

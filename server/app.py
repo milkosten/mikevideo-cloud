@@ -553,14 +553,23 @@ async def set_visibility(video_id: str, request: Request):
     vis = str(body.get("visibility") or "").lower()
     if vis not in ("private", "public"):
         return JSONResponse({"error": "visibility must be private|public"}, status_code=400)
+    # Snapshot whether it was ever public before, so we fan out only on FIRST publish.
+    prev = await db.pool().fetchrow(
+        "SELECT published_at FROM mikevideo.videos WHERE id=$1 AND user_id=$2", vid, user_id)
+    if prev is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
     # never-trust-200: only flips a row the caller actually owns.
     row = await db.pool().fetchrow(
         "UPDATE mikevideo.videos SET visibility=$3,"
         " published_at=CASE WHEN $3='public' AND published_at IS NULL THEN now() ELSE published_at END,"
-        " updated_at=now() WHERE id=$1 AND user_id=$2 RETURNING id, visibility, published_at",
+        " updated_at=now() WHERE id=$1 AND user_id=$2"
+        " RETURNING id, visibility, published_at, ai_title",
         vid, user_id, vis)
     if row is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    # P8: first time this video is made public -> notify the owner's subscribers.
+    if vis == "public" and prev["published_at"] is None and row["published_at"] is not None:
+        await _fanout_new_video(user_id, row)
     return {"id": str(row["id"]), "visibility": row["visibility"],
             "published_at": _iso(row["published_at"])}
 
@@ -752,9 +761,13 @@ async def subscribe(handle: str, request: Request):
         return JSONResponse({"error": "not found"}, status_code=404)
     if owner == user_id:
         return JSONResponse({"error": "cannot subscribe to yourself"}, status_code=400)
-    await db.pool().execute(
+    inserted = await db.pool().fetchval(
         "INSERT INTO mikevideo.subscriptions(subscriber_user_id, channel_user_id)"
-        " VALUES($1,$2) ON CONFLICT DO NOTHING", user_id, owner)
+        " VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING 1", user_id, owner)
+    if inserted:                                        # P8: notify the channel owner
+        actor = await _channel_for(user_id)
+        await _notify(owner, "subscriber", {
+            "actor": {"handle": actor["handle"], "display_name": actor["display_name"]}})
     return {"subscribed": True, "subscriber_count": await _sub_count(owner)}
 
 
@@ -878,6 +891,88 @@ async def related_videos(video_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Notifications (P8) — a per-user inbox. Fanned out on new uploads, comments,
+# and new subscribers. `payload` is a jsonb dict (auto-encoded by the pool).
+# ---------------------------------------------------------------------------
+async def _notify(user_id: str, kind: str, payload: dict):
+    """Insert one notification. Best-effort — never let it break the caller."""
+    if not user_id:
+        return
+    try:
+        await db.pool().execute(
+            "INSERT INTO mikevideo.notifications(id, user_id, kind, payload)"
+            " VALUES($1,$2,$3,$4)", uuid.uuid4(), user_id, kind, payload)
+    except Exception as e:
+        logger.warning("notify(%s) failed: %s", kind, e)
+
+
+async def _fanout_new_video(owner: str, video_row):
+    """Notify every subscriber of `owner` about a newly-public video."""
+    try:
+        subs = await db.pool().fetch(
+            "SELECT subscriber_user_id FROM mikevideo.subscriptions WHERE channel_user_id=$1",
+            owner)
+        if not subs:
+            return
+        ch = await _channel_for(owner)
+        vid = str(video_row["id"])
+        payload = {
+            "video_id": vid,
+            "title": video_row["ai_title"] or "New video",
+            "thumb_url": _thumb_url(owner, vid),
+            "channel": {"handle": ch["handle"], "display_name": ch["display_name"]},
+        }
+        for s in subs:
+            await _notify(s["subscriber_user_id"], "new_video", payload)
+    except Exception as e:
+        logger.warning("fanout_new_video failed: %s", e)
+
+
+@app.get("/api/notifications")
+async def list_notifications(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    rows = await db.pool().fetch(
+        "SELECT id, kind, payload, is_read, created_at FROM mikevideo.notifications"
+        " WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50", user_id)
+    unread = await db.pool().fetchval(
+        "SELECT count(*) FROM mikevideo.notifications WHERE user_id=$1 AND is_read=false",
+        user_id) or 0
+    out = []
+    for r in rows:
+        out.append({
+            "id": str(r["id"]), "kind": r["kind"], "payload": _jsonb(r["payload"]) or {},
+            "is_read": r["is_read"], "created_at": _iso(r["created_at"]),
+        })
+    return {"notifications": out, "unread_count": int(unread)}
+
+
+@app.post("/api/notifications/read")
+async def mark_notifications_read(request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    nid = body.get("id")
+    if nid:
+        cid = _vid_or_400(str(nid))
+        if cid is None:
+            return JSONResponse({"error": "bad id"}, status_code=400)
+        await db.pool().execute(
+            "UPDATE mikevideo.notifications SET is_read=true WHERE id=$1 AND user_id=$2",
+            cid, user_id)
+    else:
+        await db.pool().execute(
+            "UPDATE mikevideo.notifications SET is_read=true WHERE user_id=$1 AND is_read=false",
+            user_id)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # Comments (P5) — threaded (one reply level), per-viewer likes + owner heart.
 # ---------------------------------------------------------------------------
 async def _video_access(video_id):
@@ -976,6 +1071,12 @@ async def post_comment(video_id: str, request: Request):
     await db.pool().execute(
         "INSERT INTO mikevideo.comments(id, video_id, user_id, parent_id, body)"
         " VALUES($1,$2,$3,$4,$5)", cid, vid, user_id, pid, text)
+    # P8: notify the video owner someone commented (never self-notify).
+    if owner and owner != user_id:
+        actor = await _channel_for(user_id)
+        await _notify(owner, "comment", {
+            "video_id": str(vid), "snippet": text[:120],
+            "actor": {"handle": actor["handle"], "display_name": actor["display_name"]}})
     r = await db.pool().fetchrow(_COMMENT_SELECT + " WHERE c.id=$1", cid, user_id)
     return _comment_node(r, user_id, owner)
 
