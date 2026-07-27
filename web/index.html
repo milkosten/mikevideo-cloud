@@ -731,6 +731,53 @@ function expandMini(){ if(_miniId) go('watch='+_miniId); }
 function closeMini(){ const mini=$('#mini'); if(mini){ const v=mini.querySelector('video'); if(v){ try{v.pause();}catch(e){} } mini.remove(); }
   if(hls){ try{hls.destroy();}catch(e){} hls=null; } _miniId=null; window._video=null; }
 function seekTo(sec){ if(window._video){ try{ window._video.currentTime=sec; window._video.play(); }catch(e){} } }
+
+/* ---------------- custom thumbnail + trim (P13) ---------------- */
+function bustThumb(id, url){
+  document.querySelectorAll('img[src*="'+id+'/thumb.jpg"]').forEach(img=>{ img.src=url; });
+  LIB.forEach(v=>{ if(v.id===id) v.thumb_url=url; });
+}
+function openThumb(id){
+  const cur = window._video? window._video.currentTime : 0;
+  const d=modal(`<button class="close" onclick="this.closest('.modal').remove()">×</button>
+    <h3>Set thumbnail</h3><p>Grab the frame you're paused on, or upload your own image.</p>
+    <div class="row"><button class="btn primary" id="th_frame" style="flex:1;justify-content:center">📸 Use current frame · ${fmtDur(cur)}</button></div>
+    <label class="btn ghost" style="display:inline-flex;cursor:pointer;margin-top:12px">⬆ Upload an image<input type="file" id="th_file" accept="image/*" hidden></label>
+    <div class="err" id="th_err"></div>`);
+  d.querySelector('#th_frame').onclick=async()=>{
+    try{ const r=await afetch('/api/videos/'+id+'/thumbnail',{method:'POST',headers:hdr({'Content-Type':'application/json'}),
+        body:JSON.stringify({at_sec: window._video? window._video.currentTime : 0})});
+      const j=await r.json(); if(!r.ok){ $('#th_err').textContent=j.error||'Failed'; return; }
+      d.remove(); toast('Thumbnail updated'); bustThumb(id, j.thumb_url); }catch(e){ $('#th_err').textContent='Network error'; }
+  };
+  d.querySelector('#th_file').onchange=async(e)=>{
+    const f=e.target.files[0]; if(!f) return; $('#th_err').textContent='Uploading…';
+    const fd=new FormData(); fd.append('image', f);
+    try{ const r=await afetch('/api/videos/'+id+'/thumbnail',{method:'POST',body:fd});
+      const j=await r.json(); if(!r.ok){ $('#th_err').textContent=j.error||'Failed'; return; }
+      d.remove(); toast('Thumbnail updated'); bustThumb(id, j.thumb_url); }catch(e){ $('#th_err').textContent='Upload failed'; }
+  };
+}
+function openTrim(id, dur){
+  const cur=window._video? window._video.currentTime : 0;
+  const d=modal(`<button class="close" onclick="this.closest('.modal').remove()">×</button>
+    <h3>Trim a copy</h3><p>Makes a new re-encoded clip in your library. The original stays untouched.</p>
+    <label>Start (seconds)<input id="tr_s" type="number" min="0" step="0.1" value="${cur.toFixed(1)}"></label>
+    <label>End (seconds)<input id="tr_e" type="number" min="0" step="0.1" value="${(dur||cur+10).toFixed(1)}"></label>
+    <div class="row" style="margin-top:10px">
+      <button class="btn ghost" onclick="document.getElementById('tr_s').value=(window._video?window._video.currentTime:0).toFixed(1)">⇥ Start = now</button>
+      <button class="btn ghost" onclick="document.getElementById('tr_e').value=(window._video?window._video.currentTime:0).toFixed(1)">End = now ⇤</button></div>
+    <div class="err" id="tr_err"></div>
+    <div class="row" style="justify-content:flex-end;margin-top:8px"><button class="btn primary" id="tr_go">Create trimmed clip</button></div>`);
+  d.querySelector('#tr_go').onclick=async()=>{
+    const s=parseFloat($('#tr_s').value), e=parseFloat($('#tr_e').value);
+    if(!(e>s)){ $('#tr_err').textContent='End must be after start'; return; }
+    $('#tr_err').textContent='Working…';
+    try{ const r=await afetch('/api/videos/'+id+'/trim',{method:'POST',headers:hdr({'Content-Type':'application/json'}),body:JSON.stringify({start_sec:s,end_sec:e})});
+      const j=await r.json(); if(!r.ok){ $('#tr_err').textContent=j.error||'Failed'; return; }
+      d.remove(); toast('Trimming — your clip will appear in Your videos shortly'); }catch(e){ $('#tr_err').textContent='Network error'; }
+  };
+}
 function renderWatchInfo(v){
   const owner=v.is_owner;
   const meta=[dims(v), v.captions_url?('CC '+(v.spoken_language||'').toUpperCase()):'', fmtDur(v.duration_sec), fmtBytes(v.bytes)].filter(Boolean).join('  ·  ');
@@ -760,6 +807,8 @@ function renderWatchInfo(v){
       ${visBtn}
       <button class="pill" onclick="share('${v.id}',${v.visibility==='public'})">🔗 Share</button>
       ${owner?`<button class="pill" onclick="copyLink('${v.id}')">Copy link</button>`:''}
+      ${owner?`<button class="pill" onclick="openThumb('${v.id}')" title="Custom thumbnail">🖼 Thumbnail</button>`:''}
+      ${owner?`<button class="pill" onclick="openTrim('${v.id}',${v.duration_sec||0})" title="Trim a copy">✂ Trim</button>`:''}
       <button class="pill" onclick="toggleTheater()" title="Theater mode (t)">🖥 Theater</button>
       <div class="spacer"></div>
     </div>

@@ -14,6 +14,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -572,6 +573,126 @@ async def set_visibility(video_id: str, request: Request):
         await _fanout_new_video(user_id, row)
     return {"id": str(row["id"]), "visibility": row["visibility"],
             "published_at": _iso(row["published_at"])}
+
+
+# ---------------------------------------------------------------------------
+# Custom thumbnails + light edit (P13). Owner-only. ffmpeg via encode._run
+# (paths only — never a video into RAM).
+# ---------------------------------------------------------------------------
+@app.post("/api/videos/{video_id}/thumbnail")
+async def set_thumbnail(video_id: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    r = await db.pool().fetchrow(
+        "SELECT status, duration_sec FROM mikevideo.videos WHERE id=$1 AND user_id=$2",
+        vid, user_id)
+    if r is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if r["status"] != "ready":
+        return JSONResponse({"error": "video not ready"}, status_code=409)
+    out_dir = config.DATA_ROOT / user_id / str(vid)
+    thumb = out_dir / "thumb.jpg"
+    tmp = out_dir / "thumb.new.jpg"
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("multipart/"):                       # upload an image
+        form = await request.form()
+        up = form.get("image")
+        if up is None or not hasattr(up, "read"):
+            return JSONResponse({"error": "image file required"}, status_code=400)
+        raw = out_dir / "thumb.upload.tmp"
+        try:
+            with open(raw, "wb") as f:
+                while True:
+                    chunk = await up.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            rc, err = await encode._run(
+                "ffmpeg", "-y", "-i", str(raw), "-vf", "scale='min(1280,iw)':-2",
+                "-frames:v", "1", "-q:v", "3", str(tmp))
+        finally:
+            raw.unlink(missing_ok=True)
+        if rc != 0 or not tmp.exists():
+            return JSONResponse({"error": "invalid image"}, status_code=400)
+    else:                                                    # pick a frame at at_sec
+        try:
+            at = float((await request.json()).get("at_sec"))
+        except Exception:
+            return JSONResponse({"error": "at_sec required"}, status_code=400)
+        dur = float(r["duration_sec"] or 0)
+        at = max(0.0, min(at, max(0.0, dur - 0.1)))
+        src = out_dir / "video.mp4"
+        if not src.exists():
+            return JSONResponse({"error": "media missing"}, status_code=404)
+        rc, err = await encode._run(
+            "ffmpeg", "-y", "-ss", f"{at:.2f}", "-i", str(src), "-vf", "setsar=1",
+            "-frames:v", "1", "-q:v", "3", str(tmp))
+        if rc != 0 or not tmp.exists():
+            return JSONResponse({"error": "could not extract frame"}, status_code=500)
+    try:
+        tmp.replace(thumb)
+    except Exception as e:
+        logger.warning("thumbnail write failed: %s", e)
+        return JSONResponse({"error": "write failed"}, status_code=500)
+    await db.pool().execute("UPDATE mikevideo.videos SET updated_at=now() WHERE id=$1", vid)
+    bust = int(datetime.now(timezone.utc).timestamp())
+    return {"ok": True, "thumb_url": f"{_thumb_url(user_id, str(vid))}?t={bust}"}
+
+
+@app.post("/api/videos/{video_id}/trim")
+async def trim_video(video_id: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    r = await db.pool().fetchrow(
+        "SELECT status, duration_sec, filename FROM mikevideo.videos"
+        " WHERE id=$1 AND user_id=$2", vid, user_id)
+    if r is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if r["status"] != "ready":
+        return JSONResponse({"error": "video not ready"}, status_code=409)
+    try:
+        body = await request.json()
+        start = float(body.get("start_sec"))
+        end = float(body.get("end_sec"))
+    except Exception:
+        return JSONResponse({"error": "start_sec, end_sec required"}, status_code=400)
+    dur = float(r["duration_sec"] or 0)
+    start = max(0.0, start)
+    if dur:
+        end = min(end, dur)
+    if end - start < 0.5:
+        return JSONResponse({"error": "clip too short (min 0.5s)"}, status_code=400)
+    src = config.DATA_ROOT / user_id / str(vid) / "video.mp4"
+    if not src.exists():
+        return JSONResponse({"error": "media missing"}, status_code=404)
+    # Trim produces a NEW private video that flows through the normal encode worker.
+    new_id = uuid.uuid4()
+    new_dir = config.DATA_ROOT / user_id / str(new_id)
+    new_dir.mkdir(parents=True, exist_ok=True)
+    new_original = new_dir / "original.mp4"
+    rc, err = await encode._run(
+        "ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(src), "-t", f"{end - start:.2f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-movflags", "+faststart", str(new_original))
+    if rc != 0 or not new_original.exists():
+        shutil.rmtree(new_dir, ignore_errors=True)
+        logger.warning("trim ffmpeg failed: %s", err)
+        return JSONResponse({"error": "trim failed"}, status_code=500)
+    base = (r["filename"] or "clip")
+    await db.pool().execute(
+        "INSERT INTO mikevideo.videos(id, user_id, upload_id, filename, content_type,"
+        " bytes, status, visibility) VALUES($1,$2,$3,$4,'video/mp4',$5,'encoding','private')",
+        new_id, user_id, uuid.uuid4().hex, f"{base} (trim)", new_original.stat().st_size)
+    encode.enqueue(str(new_id))
+    return {"ok": True, "video_id": str(new_id)}
 
 
 # ---------------------------------------------------------------------------
