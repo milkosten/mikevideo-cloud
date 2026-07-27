@@ -891,6 +891,48 @@ async def related_videos(video_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/shorts — the vertical Shorts feed (P9): portrait, short public videos.
+# Returns playable media urls inline so the swipe feed needs no per-item fetch.
+# ---------------------------------------------------------------------------
+@app.get("/api/shorts")
+async def shorts_feed(request: Request):
+    viewer = await authenticate(request)          # optional — for the like state
+    rows = await db.pool().fetch(
+        "SELECT v.id, v.user_id, v.ai_title, v.filename, v.duration_sec,"
+        " v.display_width, v.display_height, v.orientation, v.spoken_language,"
+        " v.transcript_status, v.view_count, v.has_audio, v.created_at, v.published_at,"
+        " c.handle, c.display_name AS channel_name, c.avatar_url,"
+        " (SELECT count(*) FROM mikevideo.likes l WHERE l.video_id=v.id) AS likes"
+        " FROM mikevideo.videos v LEFT JOIN mikevideo.channels c ON c.user_id=v.user_id"
+        " WHERE v.visibility='public' AND v.status='ready'"
+        "   AND v.orientation='portrait' AND COALESCE(v.duration_sec, 999) <= 90"
+        " ORDER BY v.published_at DESC NULLS LAST, v.created_at DESC LIMIT 50")
+    liked_ids = set()
+    if viewer:
+        lrows = await db.pool().fetch(
+            "SELECT video_id FROM mikevideo.likes WHERE user_id=$1", viewer)
+        liked_ids = {str(r["video_id"]) for r in lrows}
+    out = []
+    for r in rows:
+        vid = str(r["id"])
+        base = f"/media/{r['user_id']}/{vid}"
+        capt = (f"{base}/captions/{r['spoken_language'] or 'und'}.vtt"
+                if r["transcript_status"] == "ready" else None)
+        out.append({
+            "id": vid, "ai_title": r["ai_title"], "duration_sec": r["duration_sec"],
+            "display_width": r["display_width"], "display_height": r["display_height"],
+            "orientation": r["orientation"], "has_audio": r["has_audio"],
+            "spoken_language": r["spoken_language"], "view_count": r["view_count"],
+            "likes": int(r["likes"] or 0), "liked": vid in liked_ids,
+            "channel": _channel_brief(r["handle"], r["channel_name"], r["avatar_url"], r["user_id"]),
+            "hls_url": f"{base}/hls/master.m3u8", "mp4_url": f"{base}/video.mp4",
+            "thumb_url": f"{base}/thumb.jpg", "captions_url": capt,
+            "created_at": _iso(r["created_at"]),
+        })
+    return {"shorts": out}
+
+
+# ---------------------------------------------------------------------------
 # Notifications (P8) — a per-user inbox. Fanned out on new uploads, comments,
 # and new subscribers. `payload` is a jsonb dict (auto-encoded by the pool).
 # ---------------------------------------------------------------------------
