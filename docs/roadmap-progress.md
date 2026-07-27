@@ -21,7 +21,7 @@ Status legend: `PENDING` · `IN_PROGRESS` · `DONE` · `FAILED`
 | **P10** | DONE | **Player polish.** Web: quality selector (HLS levels via hls.js), playback-speed menu, miniplayer (keep playing while browsing), theater mode, keyboard shortcuts. App: speed + quality + PiP/background. |
 | **P11** | DONE | **Trending / Explore.** `GET /api/explore` + `?tag=`: popular public videos, categories from AI tags. Web: an Explore page with tag chips. App: explore. |
 | **P12** | DONE | **Creator Studio (analytics).** `GET /api/studio/overview` + per-video stats: views over time, watch-time (from progress), likes, top videos. Web: a Studio dashboard. App: a lightweight studio view. |
-| **P13** | PENDING | **Custom thumbnails + light edit.** Pick a frame or upload a thumbnail (`POST /api/videos/{id}/thumbnail`); optional trim (re-encode a subclip). Web: thumbnail picker on watch/studio. App: thumbnail picker. |
+| **P13** | IN_PROGRESS | **Custom thumbnails + light edit.** Pick a frame or upload a thumbnail (`POST /api/videos/{id}/thumbnail`); optional trim (re-encode a subclip). Web: thumbnail picker on watch/studio. App: thumbnail picker. |
 | **P14** | PENDING | **Embeds + external share.** An embeddable player (`GET /embed/{id}` for public videos) + oEmbed (`GET /api/oembed`). Web: a Share→Embed dialog with copyable iframe. (App: n/a.) |
 
 ## Run log (append one line per run)
