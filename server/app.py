@@ -12,6 +12,7 @@ import hashlib
 import html
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -400,7 +401,8 @@ _DETAIL_COLS = (
     " audio_sample_rate, color_primaries, color_transfer, color_space,"
     " is_hdr, spoken_language, language_confidence, transcript_status,"
     " has_speech, ai_title, ai_summary, ai_tags, ai_chapters, enrich_status,"
-    " visibility, view_count, bytes, taken_at, created_at, published_at"
+    " visibility, view_count, bytes, taken_at, created_at, published_at,"
+    " has_gps, distance_m"
 )
 
 
@@ -438,6 +440,8 @@ def _detail_payload(r, is_owner: bool) -> dict:
         "visibility": r["visibility"],
         "view_count": r["view_count"],
         "bytes": r["bytes"],
+        "has_gps": r["has_gps"],
+        "distance_m": r["distance_m"],
         "duration": r["duration_sec"],
         "hls_url": f"{base}/hls/master.m3u8" if ready else None,
         "mp4_url": f"{base}/video.mp4" if ready else None,
@@ -696,6 +700,140 @@ async def trim_video(video_id: str, request: Request):
         new_id, user_id, uuid.uuid4().hex, f"{base} (trim)", new_original.stat().st_size)
     encode.enqueue(str(new_id))
     return {"ok": True, "video_id": str(new_id)}
+
+
+# ---------------------------------------------------------------------------
+# GPS track (G1) — ingest the camera's per-clip location sidecar
+# (schema "mikeos.video.gpstrack/1"), normalize + derive stats. Stored in the DB
+# (jsonb), PRIVATE: full track only to the owner; public sees a coarse centroid.
+# ---------------------------------------------------------------------------
+def _haversine_m(lat1, lon1, lat2, lon2) -> float:
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _gps_normalize(raw: dict) -> dict | None:
+    """Validate + normalize a gpstrack sidecar into {meta, samples, stats}. Small
+    numbers of points only ever reach RAM (a track is KB-scale). Returns None if empty."""
+    samples_in = raw.get("samples")
+    if not isinstance(samples_in, list) or not samples_in:
+        return None
+    pts = []
+    for s in samples_in:
+        try:
+            lat = float(s["lat"]); lon = float(s.get("lon", s.get("lng")))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        p = {"t": s.get("t"), "lat": round(lat, 6), "lon": round(lon, 6)}
+        for k, src in (("alt", "alt"), ("spd", "speed"), ("brg", "bearing"), ("acc", "accuracy")):
+            v = s.get(src)
+            if isinstance(v, (int, float)):
+                p[k] = round(float(v), 2)
+        pts.append(p)
+    if not pts:
+        return None
+    # Downsample very long tracks to keep the jsonb tidy (keep endpoints).
+    if len(pts) > 4000:
+        step = math.ceil(len(pts) / 3000)
+        pts = pts[::step] + [pts[-1]]
+    lats = [p["lat"] for p in pts]; lons = [p["lon"] for p in pts]
+    dist = sum(_haversine_m(pts[i - 1]["lat"], pts[i - 1]["lon"], pts[i]["lat"], pts[i]["lon"])
+               for i in range(1, len(pts)))
+    speeds = [p["spd"] for p in pts if "spd" in p]
+    moving = sum(1 for sp in speeds if sp > 0.5)
+    interval = raw.get("intervalSec") or 1
+    return {
+        "meta": {
+            "schema": raw.get("schema"), "startedAt": raw.get("startedAt"),
+            "durationSec": raw.get("durationSec"), "intervalSec": interval,
+            "source": raw.get("source"), "count": len(pts),
+        },
+        "samples": pts,
+        "stats": {
+            "point_count": len(pts),
+            "start_lat": pts[0]["lat"], "start_lng": pts[0]["lon"],
+            "centroid_lat": round(sum(lats) / len(lats), 6),
+            "centroid_lng": round(sum(lons) / len(lons), 6),
+            "bbox": [min(lons), min(lats), max(lons), max(lats)],
+            "distance_m": round(dist, 1),
+            "moving_seconds": int(moving * interval),
+            "avg_speed": round(sum(speeds) / len(speeds), 2) if speeds else None,
+            "max_speed": round(max(speeds), 2) if speeds else None,
+        },
+    }
+
+
+@app.post("/api/videos/{video_id}/gps")
+async def set_gps(video_id: str, request: Request):
+    user_id = await _auth(request, scope="video.write")
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    owned = await db.pool().fetchval(
+        "SELECT 1 FROM mikevideo.videos WHERE id=$1 AND user_id=$2", vid, user_id)
+    if not owned:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        raw = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    if not isinstance(raw, dict):
+        return JSONResponse({"error": "expected a gpstrack object"}, status_code=400)
+    norm = _gps_normalize(raw)
+    if norm is None:
+        return JSONResponse({"error": "no valid samples"}, status_code=400)
+    st = norm["stats"]
+    await db.pool().execute(
+        "UPDATE mikevideo.videos SET has_gps=true, gps_status='ready', gps=$2,"
+        " gps_point_count=$3, start_lat=$4, start_lng=$5, centroid_lat=$6,"
+        " centroid_lng=$7, bbox=$8, distance_m=$9, moving_seconds=$10,"
+        " avg_speed=$11, max_speed=$12, updated_at=now() WHERE id=$1",
+        vid, {"meta": norm["meta"], "samples": norm["samples"]}, st["point_count"],
+        st["start_lat"], st["start_lng"], st["centroid_lat"], st["centroid_lng"],
+        st["bbox"], st["distance_m"], st["moving_seconds"], st["avg_speed"], st["max_speed"])
+    return {"ok": True, "point_count": st["point_count"], "distance_m": st["distance_m"],
+            "centroid": [st["centroid_lat"], st["centroid_lng"]]}
+
+
+@app.get("/api/videos/{video_id}/gps")
+async def get_gps(video_id: str, request: Request):
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    r = await db.pool().fetchrow(
+        "SELECT user_id, visibility, has_gps, gps, gps_point_count, distance_m,"
+        " moving_seconds, avg_speed, max_speed, centroid_lat, centroid_lng, bbox,"
+        " start_lat, start_lng FROM mikevideo.videos WHERE id=$1", vid)
+    if r is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    viewer = await authenticate(request)
+    is_owner = viewer == r["user_id"]
+    if not is_owner and r["visibility"] != "public":
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not r["has_gps"]:
+        return {"has_gps": False}
+    stats = {
+        "point_count": r["gps_point_count"], "distance_m": r["distance_m"],
+        "moving_seconds": r["moving_seconds"], "avg_speed": r["avg_speed"],
+        "max_speed": r["max_speed"],
+    }
+    if is_owner:
+        # Full precision: the exact track, bbox, and start.
+        return {"has_gps": True, "is_owner": True, "stats": stats,
+                "bbox": _jsonb(r["bbox"]), "start": [r["start_lat"], r["start_lng"]],
+                "centroid": [r["centroid_lat"], r["centroid_lng"]],
+                "track": _jsonb(r["gps"])}
+    # Public: coarse only — a ~1 km-rounded centroid + distance. No precise track.
+    return {"has_gps": True, "is_owner": False, "stats": {"distance_m": r["distance_m"]},
+            "coarse_centroid": [round(r["centroid_lat"] or 0, 2), round(r["centroid_lng"] or 0, 2)]}
 
 
 # ---------------------------------------------------------------------------
