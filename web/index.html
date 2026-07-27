@@ -806,6 +806,7 @@ function renderWatchInfo(v){
       <button class="pill" onclick="openSave('${v.id}')">➕ Save</button>
       ${visBtn}
       <button class="pill" onclick="share('${v.id}',${v.visibility==='public'})">🔗 Share</button>
+      ${v.visibility==='public'?`<button class="pill" onclick="openEmbed('${v.id}',${v.display_width||16},${v.display_height||9})" title="Embed on another site">&lt;/&gt; Embed</button>`:''}
       ${owner?`<button class="pill" onclick="copyLink('${v.id}')">Copy link</button>`:''}
       ${owner?`<button class="pill" onclick="openThumb('${v.id}')" title="Custom thumbnail">🖼 Thumbnail</button>`:''}
       ${owner?`<button class="pill" onclick="openTrim('${v.id}',${v.duration_sec||0})" title="Trim a copy">✂ Trim</button>`:''}
@@ -945,6 +946,25 @@ async function share(id, isPublic){
   const url=watchLink(id);
   if(navigator.share){ try{ await navigator.share({title:'MikeVideo', url}); return; }catch(e){} }
   copyLink(id);
+}
+/* ---------------- embed (P14) ---------------- */
+function openEmbed(id, dw, dh){
+  dw=dw||16; dh=dh||9; const w=560, h=Math.round(w*dh/dw);
+  const src=location.origin+'/embed/'+id;
+  const code=`<iframe src="${src}" width="${w}" height="${h}" frameborder="0" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>`;
+  const ph=Math.min(h, Math.round(300*(dw>=dh?1:1))); // preview height cap
+  const d=modal(`<button class="close" onclick="this.closest('.modal').remove()">×</button>
+    <h3>Embed this video</h3><p>Paste this HTML on any website. Only public videos embed.</p>
+    <textarea id="emb_code" readonly rows="3" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:11px;padding:11px 13px;color:var(--ink);font:12.5px/1.5 ui-monospace,Menlo,monospace;resize:vertical">${esc(code)}</textarea>
+    <div class="row" style="justify-content:space-between;align-items:center;margin-top:10px">
+      <a href="${src}" target="_blank" rel="noopener" style="color:var(--muted);font-size:12.5px">Open the embed ↗</a>
+      <button class="btn primary" id="emb_copy">Copy code</button></div>
+    <div style="margin-top:16px"><div class="hint">Preview</div>
+      <iframe src="${src}" style="width:100%;height:${Math.min(240, h)}px;border:1px solid var(--line);border-radius:11px;margin-top:6px;background:#000" allow="fullscreen" allowfullscreen></iframe></div>`);
+  d.querySelector('#emb_copy').onclick=()=>{
+    const t=d.querySelector('#emb_code'); try{ t.select(); }catch(e){}
+    navigator.clipboard.writeText(code).then(()=>toast('Embed code copied')).catch(()=>{ try{document.execCommand('copy');toast('Embed code copied');}catch(_){ toast('Copy failed'); } });
+  };
 }
 
 /* ---------------- subscriptions (P4) ---------------- */

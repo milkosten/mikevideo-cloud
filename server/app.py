@@ -9,6 +9,7 @@ never load a whole file into RAM (ffmpeg streams; media served with byte-range).
 """
 import asyncio
 import hashlib
+import html
 import json
 import logging
 import mimetypes
@@ -38,6 +39,8 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 # OAuth Authorization Server (account.osmike.com) — the web PKCE token exchange
 # is proxied through here so the browser hits one origin (no CORS on the AS).
 OAUTH_ISSUER = os.environ.get("ACCOUNT_OSMIKE_ISSUER", "https://account.osmike.com").rstrip("/")
+# Public origin — used to build absolute embed/oEmbed urls that work off-site.
+SITE_URL = os.environ.get("SITE_URL", "https://video.osmike.com").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -1878,6 +1881,103 @@ async def serve_media(user_id: str, video_id: str, path: str, request: Request):
     if not target.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
     return _range_response(target, request)
+
+
+# ---------------------------------------------------------------------------
+# Embeds + oEmbed (P14) — an iframe-able player for PUBLIC videos + oEmbed JSON.
+# ---------------------------------------------------------------------------
+def _embed_shell(body: str, title: str = "MikeVideo") -> str:
+    return (f"<!doctype html><html lang=en><head><meta charset=utf-8>"
+            f"<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+            f"<title>{html.escape(title)}</title>"
+            f"<style>html,body{{margin:0;height:100%;background:#000;color:#aaa;"
+            f"font:600 14px -apple-system,system-ui,sans-serif;display:grid;place-items:center}}</style>"
+            f"</head><body>{body}</body></html>")
+
+
+@app.get("/embed/{video_id}", response_class=HTMLResponse)
+async def embed_player(video_id: str):
+    frame_ok = {"Content-Security-Policy": "frame-ancestors *"}
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return HTMLResponse(_embed_shell("<div>Video not available.</div>"),
+                            status_code=400, headers=frame_ok)
+    r = await db.pool().fetchrow(
+        "SELECT user_id, ai_title, display_width, display_height, spoken_language,"
+        " transcript_status FROM mikevideo.videos"
+        " WHERE id=$1 AND visibility='public' AND status='ready'", vid)
+    if r is None:
+        return HTMLResponse(_embed_shell("<div>This video is private or unavailable.</div>"),
+                            status_code=404, headers=frame_ok)
+    base = f"/media/{r['user_id']}/{video_id}"          # relative: same origin as the iframe doc
+    hls = f"{base}/hls/master.m3u8"
+    mp4 = f"{base}/video.mp4"
+    poster = f"{base}/thumb.jpg"
+    title = r["ai_title"] or "MikeVideo"
+    cap = (f"{base}/captions/{r['spoken_language'] or 'und'}.vtt"
+           if r["transcript_status"] == "ready" else None)
+    track = (f'<track kind=subtitles src="{cap}" srclang="{html.escape(r["spoken_language"] or "und")}" default>'
+             if cap else "")
+    oe = f"{SITE_URL}/api/oembed?url={SITE_URL}/embed/{video_id}&format=json"
+    page = f"""<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>{html.escape(title)} · MikeVideo</title>
+<link rel=alternate type="application/json+oembed" href="{html.escape(oe)}" title="{html.escape(title)}">
+<style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}#v{{width:100vw;height:100vh;object-fit:contain;background:#000;display:block}}
+.brand{{position:fixed;right:10px;bottom:10px;z-index:2;font:600 12px -apple-system,system-ui,sans-serif;color:#fff;opacity:.82;text-decoration:none;background:rgba(0,0,0,.45);padding:5px 9px;border-radius:7px}}
+.brand:hover{{opacity:1}}</style></head>
+<body><video id=v controls playsinline poster="{poster}">{track}</video>
+<a class=brand href="{SITE_URL}/#watch={video_id}" target=_blank rel=noopener>▶ MikeVideo</a>
+<script src="/hls.js"></script><script>
+(function(){{var v=document.getElementById('v'),H={json.dumps(hls)},M={json.dumps(mp4)};
+if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=H;
+else if(window.Hls&&Hls.isSupported()){{var h=new Hls({{maxBufferLength:24}});h.loadSource(H);h.attachMedia(v);}}
+else v.src=M;}})();
+</script></body></html>"""
+    return HTMLResponse(page, headers={**frame_ok, "Cache-Control": "public, max-age=300"})
+
+
+@app.get("/api/oembed")
+async def oembed(request: Request):
+    url = request.query_params.get("url", "")
+    m = re.search(r"(?:watch=|/embed/)([0-9a-fA-F-]{36})", url)
+    if not m:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        vid = uuid.UUID(m.group(1))
+    except ValueError:
+        return JSONResponse({"error": "bad url"}, status_code=404)
+    r = await db.pool().fetchrow(
+        "SELECT user_id, ai_title, display_width, display_height FROM mikevideo.videos"
+        " WHERE id=$1 AND visibility='public' AND status='ready'", vid)
+    if r is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    dw = r["display_width"] or 16
+    dh = r["display_height"] or 9
+
+    def _int(k):
+        try:
+            return int(request.query_params.get(k) or 0)
+        except ValueError:
+            return 0
+    w = _int("maxwidth") or 560
+    h = round(w * dh / dw)
+    maxh = _int("maxheight")
+    if maxh and h > maxh:
+        h = maxh
+        w = round(h * dw / dh)
+    embed_url = f"{SITE_URL}/embed/{vid}"
+    title = r["ai_title"] or "MikeVideo"
+    iframe = (f'<iframe src="{embed_url}" width="{w}" height="{h}" frameborder="0"'
+              f' allow="autoplay; fullscreen; picture-in-picture" allowfullscreen'
+              f' title="{html.escape(title)}"></iframe>')
+    return JSONResponse({
+        "version": "1.0", "type": "video", "title": title,
+        "provider_name": "MikeVideo", "provider_url": SITE_URL,
+        "width": w, "height": h, "html": iframe,
+        "thumbnail_url": f"{SITE_URL}/media/{r['user_id']}/{vid}/thumb.jpg",
+        "thumbnail_width": dw, "thumbnail_height": dh,
+    })
 
 
 # ---------------------------------------------------------------------------
