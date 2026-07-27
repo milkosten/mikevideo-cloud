@@ -966,6 +966,84 @@ async def explore(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Creator Studio (P12) — analytics over the owner's OWN videos.
+# ---------------------------------------------------------------------------
+@app.get("/api/studio/overview")
+async def studio_overview(request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    totals = await db.pool().fetchrow(
+        "SELECT count(*) FILTER (WHERE status='ready') AS videos,"
+        " count(*) FILTER (WHERE visibility='public' AND status='ready') AS public_videos,"
+        " COALESCE(SUM(view_count),0) AS views"
+        " FROM mikevideo.videos WHERE user_id=$1", user_id)
+    likes = await db.pool().fetchval(
+        "SELECT count(*) FROM mikevideo.likes l JOIN mikevideo.videos v ON v.id=l.video_id"
+        " WHERE v.user_id=$1", user_id) or 0
+    watch = await db.pool().fetchval(
+        "SELECT COALESCE(SUM(wp.position_sec),0) FROM mikevideo.watch_progress wp"
+        " JOIN mikevideo.videos v ON v.id=wp.video_id WHERE v.user_id=$1", user_id) or 0
+    dayrows = await db.pool().fetch(
+        "SELECT to_char(date_trunc('day', e.created_at),'YYYY-MM-DD') AS day, count(*) AS n"
+        " FROM mikevideo.video_view_events e JOIN mikevideo.videos v ON v.id=e.video_id"
+        " WHERE v.user_id=$1 AND e.created_at >= now() - interval '14 days'"
+        " GROUP BY 1 ORDER BY 1", user_id)
+    toprows = await db.pool().fetch(
+        "SELECT v.id, v.ai_title, v.filename, v.view_count, v.visibility, v.created_at,"
+        " (SELECT count(*) FROM mikevideo.likes l WHERE l.video_id=v.id) AS likes"
+        " FROM mikevideo.videos v WHERE v.user_id=$1 AND v.status='ready'"
+        " ORDER BY v.view_count DESC NULLS LAST, v.created_at DESC LIMIT 8", user_id)
+    top = [{"id": str(r["id"]), "title": r["ai_title"], "filename": r["filename"],
+            "views": int(r["view_count"] or 0), "likes": int(r["likes"] or 0),
+            "visibility": r["visibility"], "thumb_url": _thumb_url(user_id, str(r["id"])),
+            "created_at": _iso(r["created_at"])} for r in toprows]
+    return {
+        "totals": {"videos": int(totals["videos"] or 0),
+                   "public_videos": int(totals["public_videos"] or 0),
+                   "views": int(totals["views"] or 0), "likes": int(likes),
+                   "watch_seconds": int(watch)},
+        "views_by_day": [{"day": r["day"], "count": int(r["n"])} for r in dayrows],
+        "top_videos": top,
+    }
+
+
+@app.get("/api/studio/videos/{video_id}")
+async def studio_video(video_id: str, request: Request):
+    user_id = await _auth(request)
+    if not user_id:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    vid = _vid_or_400(video_id)
+    if vid is None:
+        return JSONResponse({"error": "bad id"}, status_code=400)
+    r = await db.pool().fetchrow(
+        "SELECT id, ai_title, filename, view_count, duration_sec, visibility, created_at"
+        " FROM mikevideo.videos WHERE id=$1 AND user_id=$2", vid, user_id)
+    if r is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    likes = await db.pool().fetchval(
+        "SELECT count(*) FROM mikevideo.likes WHERE video_id=$1", vid) or 0
+    watch = await db.pool().fetchval(
+        "SELECT COALESCE(SUM(position_sec),0) FROM mikevideo.watch_progress WHERE video_id=$1", vid) or 0
+    watchers = await db.pool().fetchval(
+        "SELECT count(*) FROM mikevideo.watch_progress WHERE video_id=$1", vid) or 0
+    avg_pos = await db.pool().fetchval(
+        "SELECT COALESCE(AVG(position_sec),0) FROM mikevideo.watch_progress WHERE video_id=$1", vid) or 0
+    dur = float(r["duration_sec"] or 0)
+    completion = min(1.0, float(avg_pos) / dur) if dur else 0.0
+    dayrows = await db.pool().fetch(
+        "SELECT to_char(date_trunc('day', created_at),'YYYY-MM-DD') AS day, count(*) AS n"
+        " FROM mikevideo.video_view_events WHERE video_id=$1"
+        "   AND created_at >= now() - interval '14 days' GROUP BY 1 ORDER BY 1", vid)
+    return {"id": str(vid), "title": r["ai_title"], "filename": r["filename"],
+            "views": int(r["view_count"] or 0), "likes": int(likes),
+            "watch_seconds": int(watch), "watchers": int(watchers),
+            "avg_completion": round(completion, 3), "duration_sec": r["duration_sec"],
+            "visibility": r["visibility"],
+            "views_by_day": [{"day": r2["day"], "count": int(r2["n"])} for r2 in dayrows]}
+
+
+# ---------------------------------------------------------------------------
 # Notifications (P8) — a per-user inbox. Fanned out on new uploads, comments,
 # and new subscribers. `payload` is a jsonb dict (auto-encoded by the pool).
 # ---------------------------------------------------------------------------
@@ -1259,6 +1337,13 @@ async def add_view(video_id: str):
         " WHERE id=$1 AND status='ready' RETURNING view_count", vid)
     if n is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    # P12: log a timestamped event so Studio can chart views-over-time (best-effort).
+    try:
+        await db.pool().execute(
+            "INSERT INTO mikevideo.video_view_events(id, video_id) VALUES($1,$2)",
+            uuid.uuid4(), vid)
+    except Exception as e:
+        logger.warning("view event log failed: %s", e)
     return {"view_count": int(n)}
 
 

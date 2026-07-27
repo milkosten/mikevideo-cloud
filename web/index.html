@@ -129,6 +129,23 @@
   .tchip{background:var(--elev);border:1px solid var(--line);border-radius:20px;padding:8px 15px;font-size:13px;font-weight:600;color:var(--ink);cursor:pointer;white-space:nowrap;text-transform:capitalize}
   .tchip:hover{background:var(--hover)}
   .tchip.on{background:var(--grad);color:#fff;border-color:transparent}
+  /* ---------- Creator Studio (P12) ---------- */
+  .statcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px}
+  .statcard{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .statcard .sv{font-size:26px;font-weight:800;line-height:1.1}
+  .statcard .sl{color:var(--muted);font-size:12.5px;font-weight:600;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}
+  .vchart{display:flex;align-items:flex-end;gap:6px;height:150px;padding:12px 2px 0;background:var(--bg2);border:1px solid var(--line);border-radius:14px}
+  .vbar{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%;justify-content:flex-end}
+  .vbar i{display:block;width:100%;max-width:26px;min-height:2px;background:var(--grad);border-radius:5px 5px 0 0;transition:.2s}
+  .vbar span{color:var(--faint);font-size:10px}
+  .toprow{display:flex;align-items:center;gap:14px;padding:10px 8px;border-radius:12px;cursor:pointer;border-bottom:1px solid var(--line)}
+  .toprow:hover{background:var(--bg2)}
+  .toprow .tt{width:120px;aspect-ratio:16/9;border-radius:9px;overflow:hidden;background:#000;flex:none;display:grid;place-items:center}
+  .toprow .tt img{width:100%;height:100%;object-fit:cover}
+  .toprow .tm{flex:1;min-width:0}
+  .toprow .tn{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .toprow .ts{color:var(--muted);font-size:12.5px;margin-top:4px}
+  .toprow .tv{font-size:18px;font-weight:800;color:var(--peri)}
   .chip.on{background:var(--ink);color:#111;border-color:var(--ink)}
 
   /* ---------- watch ---------- */
@@ -348,6 +365,7 @@
   <a data-rail="shorts" onclick="go('shorts')"><span class="ic">⚡</span>Shorts</a>
   <a data-rail="explore" onclick="go('explore')"><span class="ic">🧭</span>Explore</a>
   <a data-rail="subs" onclick="go('subs')"><span class="ic">📺</span>Subs</a>
+  <a data-rail="studio" onclick="go('studio')"><span class="ic">📊</span>Studio</a>
   <a data-rail="playlists" onclick="go('playlists')"><span class="ic">☰</span>Library</a>
 </nav>
 
@@ -468,10 +486,11 @@ function parseHash(){
   if(h==='shorts') return {v:'shorts'};
   if(h==='explore') return {v:'explore'};
   if(h.startsWith('explore=')) return {v:'explore', tag:decodeURIComponent(h.slice(8))};
+  if(h==='studio') return {v:'studio'};
   return {v:'home'};
 }
 function markRail(v){
-  const map={home:'home',subs:'subs',shorts:'shorts',explore:'explore',playlists:'playlists',playlist:'playlists'};
+  const map={home:'home',subs:'subs',shorts:'shorts',explore:'explore',studio:'studio',playlists:'playlists',playlist:'playlists'};
   document.querySelectorAll('#rail a').forEach(a=>a.classList.toggle('on', a.dataset.rail===map[v]));
 }
 async function route(){
@@ -488,6 +507,7 @@ async function route(){
   if(r.v==='subs') return renderSubs();
   if(r.v==='shorts') return renderShorts();
   if(r.v==='explore') return renderExplore(r.tag);
+  if(r.v==='studio') return renderStudio();
   return renderHome();
 }
 window.addEventListener('hashchange', route);
@@ -972,6 +992,44 @@ async function shortLike(id, btn){
 function shortMute(btn){
   const v=btn.closest('.short').querySelector('video'); if(!v) return;
   v.muted=!v.muted; btn.querySelector('[data-m]').textContent=v.muted?'🔇':'🔊';
+}
+
+/* ---------------- Creator Studio (P12) ---------------- */
+function fmtWatch(s){ s=Math.round(+s||0); const h=(s/3600)|0,m=((s%3600)/60)|0; return h?h+'h '+m+'m':(m?m+'m':s+'s'); }
+function statCard(label,val){ return `<div class="statcard"><div class="sv">${val}</div><div class="sl">${label}</div></div>`; }
+function viewsChart(days){
+  const map={}; (days||[]).forEach(x=>map[x.day]=x.count);
+  const arr=[]; for(let i=13;i>=0;i--){ const k=new Date(Date.now()-i*86400000).toISOString().slice(0,10); arr.push({k,n:map[k]||0}); }
+  const max=Math.max(1,...arr.map(a=>a.n));
+  return `<div class="sectitle" style="margin-top:26px">Views · last 14 days</div>
+    <div class="vchart">${arr.map(a=>`<div class="vbar" title="${a.k}: ${a.n} view${a.n===1?'':'s'}"><i style="height:${Math.round(a.n/max*100)}%"></i><span>${(+a.k.slice(8))}</span></div>`).join('')}</div>`;
+}
+function studioTopRow(v){
+  const title=v.title||('Clip · '+fmtDate(v.created_at));
+  return `<div class="toprow" onclick="go('watch=${v.id}')">
+    <div class="tt">${v.thumb_url?`<img src="${v.thumb_url}" loading="lazy">`:'<span class="ph">▶</span>'}</div>
+    <div class="tm"><div class="tn">${esc(title)}</div>
+      <div class="ts">${v.visibility==='public'?'🌐 Public':'🔒 Private'} · ${fmtCount(v.views)} view${v.views===1?'':'s'} · ${fmtCount(v.likes)} like${v.likes===1?'':'s'}</div></div>
+    <div class="tv">${fmtCount(v.views)}</div></div>`;
+}
+async function renderStudio(){
+  if(!TOKEN){ view.innerHTML=`<div class="empty" style="margin-top:8vh"><div style="font-size:40px">📊</div>
+    <p style="color:var(--muted);margin:12px 0 16px">Sign in to see your Creator Studio.</p>
+    <button class="btn primary" onclick="startOAuth()" style="display:inline-flex">Sign in with MikeOS</button></div>`; return; }
+  view.innerHTML=`<div class="sectitle">📊 Creator Studio</div><div id="studio"><div class="empty" style="border:none;background:none">Loading…</div></div>`;
+  let d=null;
+  try{ const r=await afetch('/api/studio/overview'); if(r.ok) d=await r.json(); }catch(e){}
+  const box=$('#studio'); if(!box) return;
+  if(!d){ box.innerHTML='<div class="empty">Could not load Studio.</div>'; return; }
+  const t=d.totals;
+  box.innerHTML = `<div class="statcards">
+      ${statCard('Views', fmtCount(t.views))}
+      ${statCard('Watch time', fmtWatch(t.watch_seconds))}
+      ${statCard('Likes', fmtCount(t.likes))}
+      ${statCard('Videos', t.videos+(t.public_videos?` · ${t.public_videos} public`:''))}
+    </div>${viewsChart(d.views_by_day)}
+    <div class="sectitle" style="margin-top:26px">Top videos</div>
+    ${(d.top_videos&&d.top_videos.length)? d.top_videos.map(studioTopRow).join('') : '<div class="hint">No videos yet.</div>'}`;
 }
 
 /* ---------------- explore (P11) ---------------- */
