@@ -29,15 +29,27 @@ the precise route. Never leak exact coordinates on a public endpoint.
 - Bulk geo artifacts go under a dedicated `/data/mikevideo-geo/` on the RAID6 (the space the
   user wants used); keep hot/small state (Postgres) on Box A. Avoid random-I/O storms on md10.
 
-## Open items to resolve at the start of G1 (need before coding ingest)
-1. **Exact `.gps.json` schema** — a track `[{t,lat,lng,alt?,speed?,acc?}]`, a single fix, or
-   a GeoJSON `LineString`? Pull one sample off a phone (`/sdcard/DCIM/…/clip.mp4.gps.json`).
-2. **Sidecar location + naming** — same folder as the clip, `clip.mp4.gps.json` vs
-   `clip.gps.json`? (Drives how the app finds it under scoped storage / MediaStore.)
-3. **Valhalla region coverage** — confirm the tile extract loaded on Box B covers the footage
-   region (e.g. France/Europe for the Cannes clips). If not, load the extract onto the RAID6.
-4. **Reverse geocoder** — reuse an existing MikeOS geocoder (places/basemap) if present, else
-   stand up **Nominatim** on Box B (the planet/regional DB fits the RAID6).
+## Open items (updated after inspecting a real phone — Samsung Note10 R58N4101P2V)
+1. **~~Schema~~ RESOLVED** — the sidecar is `schema:"mikeos.video.gpstrack/1"`, a JSON object:
+   `{schema, video, videoUri, device, startedAt(epoch ms), durationSec, intervalSec(~1),
+   source:"MikeOS-daemon", samples:[ {t(sec), ts(epoch ms), lat, lon, alt, accuracy, bearing,
+   speed(m/s), stale, fixAgeMs, source} … ]}`. ~1 Hz. Note **`lon`** (not `lng`); WGS84. Small
+   (25 s clip ≈ 5 KB; a 12-min clip ≈ ~150 KB). Real data seen: Côte d'Azur, ~43.71,7.34, driving.
+2. **~~Location/naming~~ RESOLVED** — `/sdcard/Android/data/com.mikeos.camera/files/Movies/
+   MikeCamera/<base>.gps.json` (extension **replaced**, not appended: `MIKE_x.mp4` →
+   `MIKE_x.gps.json`).
+3. **NEW WRINKLE — scoped-storage access.** The sidecar lives in the **camera app's private
+   external dir** (`Android/data/com.mikeos.camera/…`); the video is MediaStore-visible but the
+   JSON is not. Under scoped storage MikeVideo **cannot** read another app's `Android/data`.
+   Decide the production ingest broker: (a) **camera** writes the sidecar to a shared spot /
+   uploads it itself; (b) **daemon** brokers the track (it's already the GPS authority —
+   `source: MikeOS-daemon`) and MikeVideo requests it per video/time-range; (c) MikeVideo takes
+   `MANAGE_EXTERNAL_STORAGE` (heavy). Leaning (b)/(a). Backfill of existing tracks can be done
+   now via adb pull → cloud upload (no permission issue).
+4. **Valhalla region coverage** — confirm the extract loaded on Box B (`:8002`) covers the
+   footage region (Côte d'Azur / France). If not, load the extract onto the RAID6.
+5. **Reverse geocoder** — reuse a MikeOS geocoder (places/basemap) if present, else stand up
+   **Nominatim** on Box B (regional DB fits the RAID6).
 
 ---
 
