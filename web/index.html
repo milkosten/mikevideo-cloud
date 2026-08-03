@@ -356,7 +356,7 @@
     <button class="btn ghost" onclick="go('playlists')" title="Playlists">☰<span class="w"> Playlists</span></button>
     <button class="btn primary" onclick="openUpload()">↑ <span class="w">Upload</span></button>
     <span id="notif"></span>
-    <span id="account"></span>
+    <div data-mikeos-switcher></div>
   </div>
 </header>
 
@@ -402,9 +402,12 @@ function titleOf(v){ return v.ai_title || (v.created_at ? ('Clip · '+fmtDate(v.
 function ccLang(v){ return (v.transcript_status==='ready' && v.spoken_language) ? v.spoken_language.toUpperCase() : ''; }
 function toast(m){ const t=$('#toast'); t.textContent=m; t.classList.add('on'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('on'),2200); }
 function renderAccount(){
-  const a=$('#account'); if(!a) return;
   document.querySelectorAll('.hsub').forEach(b=>b.classList.toggle('hide', !TOKEN));
   renderNotif();
+  // Account display is now provided by the shared MikeOS bar (switcher.js).
+  // The email/avatar/Sign-in button is rendered there; only the DISPLAY moved —
+  // the token/OAuth logic below and elsewhere is unchanged.
+  const a=$('#account'); if(!a) return;
   if(TOKEN){
     const initial=(MYCH&&(MYCH.display_name||MYCH.handle))?(MYCH.display_name||MYCH.handle)[0].toUpperCase()
       :((USER&&USER.email)?USER.email[0].toUpperCase():'M');
@@ -1370,5 +1373,6 @@ setInterval(()=>{ if(TOKEN) loadNotifications(); }, 45000);
 // live-refresh the home grid so encoding→ready + new transcripts/titles surface
 setInterval(()=>{ if(parseHash().v==='home' && TOKEN){ loadLibrary().then(v=>{ if(_home==='mine' && parseHash().v==='home'){ const g=$('#grid'); if(g) g.innerHTML = v.length? v.map(videoCard).join('') : g.innerHTML; } }); } }, 9000);
 </script>
+<script src="https://apps.osmike.com/switcher.js" defer></script>
 </body>
 </html>
